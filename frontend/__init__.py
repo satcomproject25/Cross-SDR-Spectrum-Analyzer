@@ -1,0 +1,1 @@
+"""Frequency analyzer frontend package."""

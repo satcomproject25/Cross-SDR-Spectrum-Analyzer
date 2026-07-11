@@ -1,0 +1,16 @@
+name: freqanalyzer
+channels:
+  - conda-forge
+  - ryanvolz
+dependencies:
+  - python>=3.10
+  - numpy>=1.24
+  - pyqt6>=6.5
+  - pyqtgraph>=0.13
+  - soapysdr
+  - soapysdr-module-hackrf
+  - soapysdr-module-uhd
+  - soapysdr-module-plutosdr
+  - hackrf
+  - uhd
+  - libiio
