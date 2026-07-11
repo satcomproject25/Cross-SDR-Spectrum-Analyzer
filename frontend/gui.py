@@ -7,6 +7,7 @@ Owner: Developer B (Frontend/GUI)
 """
 
 import sys
+import re
 import threading
 import time
 from pathlib import Path
@@ -398,7 +399,11 @@ class MainWindow(QMainWindow):
         self.table_markers.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table_markers.setAlternatingRowColors(True)
         self.table_markers.verticalHeader().setVisible(False)
-        self.table_markers.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_markers.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.SelectedClicked
+            | QTableWidget.EditTrigger.EditKeyPressed
+        )
         lyt_mkrs.addWidget(self.table_markers)
         layout.addWidget(grp_mkrs)
 
@@ -450,6 +455,7 @@ class MainWindow(QMainWindow):
         self.marker_selector_btn.marker_selected.connect(self._refresh_readout_for_current_marker)
         self.btn_delta_marker.clicked.connect(self._on_delta_toggle)
         self.btn_clear_markers.clicked.connect(self._on_clear_markers)
+        self.table_markers.itemChanged.connect(self._on_marker_table_changed)
 
         self.center_freq_ctrl.value_changed_hz.connect(self._configuration_changed)
         self.span_ctrl.value_changed_hz.connect(self._configuration_changed)
@@ -656,6 +662,38 @@ class MainWindow(QMainWindow):
         self.delta_readout.hide()
         self.table_markers.setRowCount(0)
 
+    def _on_marker_table_changed(self, item: QTableWidgetItem):
+        """Apply an edited marker frequency, accepting Hz/kHz/MHz/GHz."""
+        if item.column() != 1:
+            return
+        row = item.row()
+        id_item = self.table_markers.item(row, 0)
+        if id_item is None:
+            return
+        try:
+            marker_id = int(id_item.text().lstrip("M"))
+            match = re.fullmatch(
+                r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*"
+                r"(Hz|kHz|MHz|GHz)?\s*",
+                item.text(),
+                re.IGNORECASE,
+            )
+            if match is None:
+                raise ValueError("Use a number with an optional Hz, kHz, MHz, or GHz suffix")
+            value = float(match.group(1))
+            multiplier = {
+                "hz": 1.0,
+                "khz": 1e3,
+                "mhz": 1e6,
+                "ghz": 1e9,
+            }.get((match.group(2) or "MHz").lower(), 1e6)
+            frequency_hz = value * multiplier
+            if not self.spectrum_widget.set_marker_frequency(marker_id, frequency_hz):
+                raise ValueError("The marker is not attached to a live waveform")
+        except (TypeError, ValueError) as exc:
+            self.status_bar.showMessage(f"Invalid marker frequency: {exc}", 5000)
+            self._update_marker_table(self._get_marker_state())
+
     def _on_markers_changed(self, state: dict):
         self._update_marker_table(state)
         mid = self.marker_selector_btn.current_marker_id()
@@ -707,20 +745,33 @@ class MainWindow(QMainWindow):
         return state
 
     def _update_marker_table(self, state: dict):
-        self.table_markers.setRowCount(len(state))
-        for row, (mid, entry) in enumerate(state.items()):
-            freq_str = f"{entry['frequency']/1e6:.4f} MHz"
-            amp_str = f"{entry['amplitude']:.2f} dBFS"
-            
-            delta_str = "--"
-            if entry.get("delta"):
-                delta_f = entry["delta"]["delta_f"] / 1e6
-                delta_str = f"{delta_f:+.4f} MHz"
+        self.table_markers.blockSignals(True)
+        try:
+            self.table_markers.setRowCount(len(state))
+            for row, (mid, entry) in enumerate(state.items()):
+                freq_str = f"{entry['frequency']/1e6:.4f} MHz"
+                amp_str = f"{entry['amplitude']:.2f} dBFS"
 
-            self.table_markers.setItem(row, 0, QTableWidgetItem(f"M{mid}"))
-            self.table_markers.setItem(row, 1, QTableWidgetItem(freq_str))
-            self.table_markers.setItem(row, 2, QTableWidgetItem(amp_str))
-            self.table_markers.setItem(row, 3, QTableWidgetItem(delta_str))
+                delta_str = "--"
+                if entry.get("delta"):
+                    delta_f = entry["delta"]["delta_f"] / 1e6
+                    delta_str = f"{delta_f:+.4f} MHz"
+
+                id_item = QTableWidgetItem(f"M{mid}")
+                id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                freq_item = QTableWidgetItem(freq_str)
+                amp_item = QTableWidgetItem(amp_str)
+                delta_item = QTableWidgetItem(delta_str)
+                for read_only_item in (amp_item, delta_item):
+                    read_only_item.setFlags(
+                        read_only_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                    )
+                self.table_markers.setItem(row, 0, id_item)
+                self.table_markers.setItem(row, 1, freq_item)
+                self.table_markers.setItem(row, 2, amp_item)
+                self.table_markers.setItem(row, 3, delta_item)
+        finally:
+            self.table_markers.blockSignals(False)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

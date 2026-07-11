@@ -116,6 +116,24 @@ class SpectrumWidget(QWidget):
         assert marker_id in (1, 2, 3)
         self._active_marker_id = marker_id
 
+    def set_marker_frequency(self, marker_id: int, frequency: float) -> bool:
+        """Move a normal marker to the nearest displayed FFT bin."""
+        target = self._markers.get(marker_id)
+        if target is None or self._last_frequency is None:
+            return False
+        index = int(np.argmin(np.abs(self._last_frequency - frequency)))
+        target.blockSignals(True)
+        target.setPos(
+            float(self._last_frequency[index]),
+            float(self._last_amplitude[index]),
+        )
+        target.blockSignals(False)
+        self._refresh_marker_label(marker_id)
+        if marker_id in self._delta_markers:
+            self._refresh_delta_label(marker_id)
+        self._emit_state()
+        return True
+
     def frequency_at_widget_position(self, position):
         if self._last_frequency is None:
             return None

@@ -232,6 +232,9 @@ reconfigured or restarted. Multiple traces can be displayed at the same time.
 ### Markers
 
 - Select marker M1, M2, or M3 and click the spectrum to place it.
+- Edit a marker's **Freq** cell in the marker table to move it precisely. A plain
+  number is interpreted as MHz; explicit `Hz`, `kHz`, `MHz`, and `GHz` suffixes
+  are accepted. The marker snaps to the nearest displayed FFT bin.
 - A normal marker snaps to the nearest FFT bin and follows that bin's live
   amplitude as new frames arrive.
 - Delta mode creates a second marker relative to the selected normal marker.
