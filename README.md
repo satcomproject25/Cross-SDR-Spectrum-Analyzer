@@ -487,3 +487,5 @@ connected to the RF/antenna input—not a clock, trigger, or output connector.
 - Channel power integrates the full displayed span.
 - This is an SDR-based analyzer, not a replacement for a calibrated laboratory
   spectrum analyzer or power meter.
+
+I am Krishna 
