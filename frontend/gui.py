@@ -234,54 +234,66 @@ class MainWindow(QMainWindow):
 
     def _apply_dark_theme(self):
         self.setStyleSheet("""
-            QMainWindow { background-color: #080D14; }
+            QMainWindow { background-color: #000000; }
             QWidget {
-                color: #DCE6F2;
+                color: #F2F2F2;
                 font-family: "Segoe UI", Arial, sans-serif;
                 font-size: 10pt;
             }
             QDockWidget {
-                color: #E8F0F8;
+                color: #F2F2F2;
                 font-weight: 600;
             }
             QDockWidget::title {
-                background: #101722;
+                background: #090909;
                 padding: 10px 12px;
-                border-bottom: 1px solid #253144;
+                border-bottom: 1px solid #363636;
             }
             QToolBar {
-                background-color: #0D141F;
+                background-color: #050505;
                 border: none;
-                border-bottom: 1px solid #253144;
+                border-bottom: 1px solid #363636;
                 spacing: 10px;
                 padding: 7px 12px;
             }
             QPushButton {
-                background-color: #172130;
-                border: 1px solid #2A394E;
+                background-color: #171717;
+                border: 1px solid #484848;
                 padding: 8px 13px;
                 border-radius: 6px;
                 font-weight: 600;
             }
-            QPushButton:hover { background-color: #202E40; border-color: #3B82A0; }
-            QPushButton:pressed { background-color: #101A27; }
+            QPushButton:hover { background-color: #262626; border-color: #45D9F2; }
+            QPushButton:pressed { background-color: #0F0F0F; }
             QPushButton:checked {
-                background-color: #123B4A;
-                border-color: #22B8CF;
-                color: #67E8F9;
+                background-color: #0B353C;
+                border-color: #33D6EE;
+                color: #8DEEFF;
+            }
+            QPushButton:disabled {
+                background-color: #0D0D0D;
+                border-color: #2D2D2D;
+                color: #737373;
             }
             QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #111A27;
-                border: 1px solid #2A394E;
+                background-color: #111111;
+                border: 1px solid #484848;
                 padding: 7px 9px;
                 border-radius: 6px;
-                selection-background-color: #155E75;
+                selection-background-color: #0B5664;
             }
-            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: #3B82A0; }
+            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: #45D9F2; }
             QComboBox::drop-down { border: none; width: 24px; }
+            QComboBox QAbstractItemView {
+                background-color: #101010;
+                color: #F2F2F2;
+                border: 1px solid #484848;
+                selection-background-color: #0B5664;
+                selection-color: #FFFFFF;
+            }
             QGroupBox {
-                background-color: #101722;
-                border: 1px solid #253144;
+                background-color: #0A0A0A;
+                border: 1px solid #363636;
                 border-radius: 9px;
                 margin-top: 13px;
                 padding: 12px 8px 8px 8px;
@@ -290,53 +302,53 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 12px;
                 padding: 0 5px;
-                color: #8FA3B8;
+                color: #BFC7D0;
                 font-weight: 600;
             }
-            QTabWidget::pane { border: none; background: #0B111A; }
+            QTabWidget::pane { border: none; background: #000000; }
             QTabBar::tab {
-                background: #101722;
-                color: #8294A8;
+                background: #090909;
+                color: #B8B8B8;
                 border-bottom: 2px solid transparent;
                 padding: 10px 14px;
                 min-width: 72px;
             }
-            QTabBar::tab:selected { color: #67E8F9; border-bottom-color: #22B8CF; }
-            QTabBar::tab:hover { color: #DCE6F2; }
+            QTabBar::tab:selected { color: #8DEEFF; border-bottom-color: #33D6EE; }
+            QTabBar::tab:hover { color: #FFFFFF; background: #151515; }
             QTableWidget {
-                background-color: #0D141F;
-                alternate-background-color: #111B28;
-                gridline-color: #253144;
-                border: 1px solid #253144;
+                background-color: #080808;
+                alternate-background-color: #141414;
+                gridline-color: #383838;
+                border: 1px solid #383838;
                 border-radius: 7px;
             }
             QHeaderView::section {
-                background-color: #172130;
-                color: #9FB0C2;
+                background-color: #181818;
+                color: #D8D8D8;
                 padding: 7px;
                 border: none;
-                border-right: 1px solid #253144;
+                border-right: 1px solid #383838;
             }
-            QStatusBar { background: #0D141F; border-top: 1px solid #253144; }
-            QStatusBar QLabel { color: #8FA3B8; padding: 2px 5px; }
-            QLabel#BrandTitle { color: #F1F7FC; font-size: 15pt; font-weight: 700; }
-            QLabel#BrandSubtitle { color: #6F849A; font-size: 8.5pt; }
-            QLabel#SectionLabel { color: #75889D; font-size: 8pt; font-weight: 700; }
+            QStatusBar { background: #050505; border-top: 1px solid #363636; }
+            QStatusBar QLabel { color: #C8C8C8; padding: 2px 5px; }
+            QLabel#BrandTitle { color: #FFFFFF; font-size: 15pt; font-weight: 700; }
+            QLabel#BrandSubtitle { color: #A8A8A8; font-size: 8.5pt; }
+            QLabel#SectionLabel { color: #B8B8B8; font-size: 8pt; font-weight: 700; }
             QLabel#ProfileBadge {
-                background: #102A35;
-                color: #67E8F9;
-                border: 1px solid #20556A;
+                background: #09272C;
+                color: #8DEEFF;
+                border: 1px solid #287586;
                 border-radius: 6px;
                 padding: 7px 10px;
             }
             QLabel#ProfileDetail {
-                background: #0D202A;
-                color: #87AFC0;
-                border: 1px solid #1D4657;
+                background: #081C1F;
+                color: #B6E6EE;
+                border: 1px solid #28545C;
                 border-radius: 7px;
                 padding: 9px;
             }
-            QLabel#MetricValue { color: #EAF6FF; font-weight: 700; }
+            QLabel#MetricValue { color: #FFFFFF; font-weight: 700; }
             QPushButton#RunButton {
                 background: #0F4C3A;
                 border-color: #1B7A5C;
@@ -350,17 +362,23 @@ class MainWindow(QMainWindow):
                 color: #FFD38A;
             }
             QPushButton#PanelToggle {
-                background: #111A27;
-                color: #67E8F9;
-                border: 1px solid #2A5366;
+                background: #161616;
+                color: #8DEEFF;
+                border: 1px solid #287586;
                 border-radius: 5px;
                 padding: 0px;
                 font-size: 17pt;
                 font-weight: 700;
             }
             QPushButton#PanelToggle:hover {
-                background: #123B4A;
-                border-color: #22B8CF;
+                background: #0B353C;
+                border-color: #33D6EE;
+            }
+            QToolTip {
+                background-color: #161616;
+                color: #FFFFFF;
+                border: 1px solid #585858;
+                padding: 4px;
             }
         """)
 
@@ -838,9 +856,11 @@ class MainWindow(QMainWindow):
     def _show_spectrum_context_menu(self, pos: QPoint):
         menu = QMenu(self)
         menu.setStyleSheet(
-            "QMenu { background-color: #151B26; border: 1px solid #334155; padding: 5px; } "
+            "QMenu { background-color: #101010; color: #F2F2F2; "
+            "border: 1px solid #484848; padding: 5px; } "
             "QMenu::item { padding: 7px 24px; border-radius: 4px; } "
-            "QMenu::item:selected { background-color: #123B4A; color: #67E8F9; }"
+            "QMenu::item:selected { background-color: #0B353C; color: #8DEEFF; } "
+            "QMenu::item:disabled { color: #737373; }"
         )
         
         action_add_marker = QAction("Add Marker", self)

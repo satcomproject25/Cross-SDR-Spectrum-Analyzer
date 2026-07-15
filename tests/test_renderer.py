@@ -8,7 +8,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from frontend.renderer import COLOR_AUTO_PEAK, COLOR_MAX_HOLD, SpectrumWidget
+from frontend.renderer import (
+    COLOR_AUTO_PEAK,
+    COLOR_AVERAGE,
+    COLOR_AXIS_TEXT,
+    COLOR_BACKGROUND,
+    COLOR_CLEAR_WRITE,
+    COLOR_MAX_HOLD,
+    COLOR_MIN_HOLD,
+    MARKER_COLORS,
+    SpectrumWidget,
+)
 
 
 class SpectrumWidgetTests(unittest.TestCase):
@@ -30,12 +40,43 @@ class SpectrumWidgetTests(unittest.TestCase):
     def tearDown(self):
         self.widget.close()
 
-    def test_auto_peak_marker_tracks_live_global_peak_and_owns_red(self):
-        x_data, y_data = self.widget.auto_peak_marker.getData()
-        self.assertEqual(float(x_data[0]), 200.0)
-        self.assertEqual(float(y_data[0]), -20.0)
+    def test_auto_peak_marker_tracks_selected_trace_global_peak_and_owns_red(self):
+        trace_frame = types.SimpleNamespace(
+            frequency=self.frame.frequency,
+            amplitude=np.array([-10.0, -40.0, -50.0, -60.0]),
+            max_hold=np.array([-50.0, -9.0, -40.0, -60.0]),
+            min_hold=np.array([-70.0, -65.0, -30.0, -80.0]),
+            average=np.array([-45.0, -50.0, -55.0, -8.0]),
+        )
+        self.widget.update_frame(trace_frame)
+
+        expected_peaks = {
+            "cw": (100.0, -10.0),
+            "max_hold": (200.0, -9.0),
+            "min_hold": (300.0, -30.0),
+            "average": (400.0, -8.0),
+        }
+        for trace_name, expected in expected_peaks.items():
+            with self.subTest(trace=trace_name):
+                self.widget.set_marker_trace(trace_name)
+                x_data, y_data = self.widget.auto_peak_marker.getData()
+                self.assertEqual(float(x_data[0]), expected[0])
+                self.assertEqual(float(y_data[0]), expected[1])
+
         self.assertEqual(COLOR_AUTO_PEAK, "#FF3B30")
         self.assertNotEqual(COLOR_MAX_HOLD, COLOR_AUTO_PEAK)
+
+    def test_all_spectrum_features_contrast_with_black_background(self):
+        self.assertEqual(COLOR_BACKGROUND, "#000000")
+        visible_colors = {
+            COLOR_CLEAR_WRITE,
+            COLOR_MAX_HOLD,
+            COLOR_MIN_HOLD,
+            COLOR_AVERAGE,
+            COLOR_AXIS_TEXT,
+            *MARKER_COLORS.values(),
+        }
+        self.assertNotIn(COLOR_BACKGROUND, visible_colors)
 
     def test_normal_and_delta_markers_follow_only_selected_trace(self):
         self.widget.set_active_marker(1)

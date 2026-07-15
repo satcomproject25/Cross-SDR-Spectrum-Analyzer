@@ -13,14 +13,22 @@ class TraceEngine:
 
     def update(self, spectrum):
         live = np.asarray(spectrum.amplitude, dtype=np.float32).copy()
+        live_power = np.power(10.0, live.astype(np.float64) / 10.0)
         if self.max_hold is None or self.max_hold.shape != live.shape:
             self.max_hold = live.copy()
-            self.average = live.copy()
+            self.average_power = live_power
             self.frames = 1
         else:
             np.maximum(self.max_hold, live, out=self.max_hold)
-            self.average += (live - self.average) / (self.frames + 1)
+            self.average_power += (
+                live_power - self.average_power
+            ) / (self.frames + 1)
             self.frames += 1
+
+        # Spectrum averaging is a power detector: average linear bin power,
+        # then convert the displayed result back to dBFS. Averaging dB values
+        # directly suppresses noise-like QPSK/OFDM carriers.
+        average = 10.0 * np.log10(np.maximum(self.average_power, 1e-24))
 
         # Values at the DSP clamp are numerical underflow/cancellation, not a
         # measurable receiver level. Letting one such value into a persistent
@@ -43,14 +51,14 @@ class TraceEngine:
             live=live,
             max_hold=self.max_hold.copy(),
             min_hold=self.min_hold.copy(),
-            average=self.average.copy(),
+            average=average.astype(np.float32, copy=False),
             frame_count=self.frames,
         )
 
     def clear(self):
         self.max_hold = None
         self.min_hold = None
-        self.average = None
+        self.average_power = None
         self.frames = 0
 
     def reset_min_hold(self):

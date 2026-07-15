@@ -17,7 +17,7 @@ class DSPEngine:
 
     def process(self, frame, display_span: float | None = None) -> SpectrumData:
         samples = np.asarray(frame.samples, dtype=np.complex64)
-        samples = samples - np.mean(samples)                                                                            # DC blocker
+        samples = samples - np.mean(samples)                               # DC blocker
         if samples.size != self.fft_size:
             raise ValueError(
                 f"Expected {self.fft_size} IQ samples, received {samples.size}"

@@ -88,6 +88,10 @@ class SpectrumWidget(QWidget):
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
         pi.setLabel("left", "Amplitude", units="dBFS",
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
+        for axis_name in ("bottom", "left"):
+            axis = pi.getAxis(axis_name)
+            axis.setTextPen(COLOR_AXIS_TEXT)
+            axis.setPen("#666666")
         self.plot_widget.setYRange(-120, 0)
 
         # Drag-to-zoom: left-click-drag draws a box, release zooms in
@@ -112,7 +116,7 @@ class SpectrumWidget(QWidget):
         self.curve_average.setVisible(False)
 
     def _init_auto_peak_marker(self):
-        """Create the red, non-interactive indicator for the live global peak."""
+        """Create the red, non-interactive indicator for the selected trace peak."""
         self.auto_peak_marker = pg.ScatterPlotItem(
             symbol="t1",
             size=9,
@@ -136,6 +140,37 @@ class SpectrumWidget(QWidget):
             self.auto_peak_marker.hide()
             return
         self._auto_peak_visible = not self._auto_peak_visible
+        self.auto_peak_marker.setVisible(self._auto_peak_visible)
+
+    def _update_auto_peak_marker(self):
+        """Move the auto peak marker to the global peak of the marker trace."""
+        frequency = self._last_frequency
+        amplitude = self._trace_amplitudes.get(self._marker_trace)
+        if frequency is None or amplitude is None:
+            self._auto_peak_available = False
+            self.auto_peak_marker.hide()
+            return
+
+        frequency = np.asarray(frequency)
+        amplitude = np.asarray(amplitude)
+        if frequency.shape != amplitude.shape:
+            self._auto_peak_available = False
+            self.auto_peak_marker.hide()
+            return
+
+        finite = np.flatnonzero(np.isfinite(frequency) & np.isfinite(amplitude))
+        if not finite.size:
+            self._auto_peak_available = False
+            self.auto_peak_marker.hide()
+            return
+
+        peak_index = int(finite[np.argmax(amplitude[finite])])
+        self.auto_peak_marker.setData(
+            [float(frequency[peak_index])], [float(amplitude[peak_index])]
+        )
+        if not self._auto_peak_available:
+            self._auto_peak_visible = True
+        self._auto_peak_available = True
         self.auto_peak_marker.setVisible(self._auto_peak_visible)
 
     # ------------------------------------------------------------------
@@ -167,6 +202,7 @@ class SpectrumWidget(QWidget):
             raise ValueError(f"Unknown marker trace: {trace_name}")
         self._marker_trace = trace_name
         self._last_amplitude = self._trace_amplitudes[trace_name]
+        self._update_auto_peak_marker()
         if self._last_frequency is None or self._last_amplitude is None:
             return
 
@@ -459,19 +495,7 @@ class SpectrumWidget(QWidget):
         }
         self._last_amplitude = self._trace_amplitudes[self._marker_trace]
 
-        finite = np.flatnonzero(np.isfinite(amp))
-        if finite.size:
-            peak_index = int(finite[np.argmax(amp[finite])])
-            self.auto_peak_marker.setData(
-                [float(freq[peak_index])], [float(amp[peak_index])]
-            )
-            if not self._auto_peak_available:
-                self._auto_peak_visible = True
-            self._auto_peak_available = True
-            self.auto_peak_marker.setVisible(self._auto_peak_visible)
-        else:
-            self._auto_peak_available = False
-            self.auto_peak_marker.hide()
+        self._update_auto_peak_marker()
 
         # All markers stay attached to the one trace selected in Trace Marker.
         for mid, target in self._markers.items():

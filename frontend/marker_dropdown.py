@@ -29,13 +29,13 @@ class _DropdownPanel(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("""
             #MarkerDropdownPanel {
-                background-color: #151B26;
-                border: 1px solid #334155;
+                background-color: #101010;
+                border: 1px solid #484848;
                 border-radius: 8px;
             }
             QPushButton {
                 background-color: transparent;
-                color: #DCE6F2;
+                color: #F2F2F2;
                 border: none;
                 border-radius: 0px;
                 padding: 8px 24px;
@@ -43,11 +43,11 @@ class _DropdownPanel(QFrame):
                 text-align: left;
             }
             QPushButton:hover {
-                background-color: #202A39;
+                background-color: #262626;
             }
             QPushButton:checked {
-                background-color: #123B4A;
-                color: #67E8F9;
+                background-color: #0B353C;
+                color: #8DEEFF;
             }
         """)
 

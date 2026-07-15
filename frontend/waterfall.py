@@ -3,6 +3,8 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
 COLOR_BACKGROUND = "#000000"
+COLOR_AXIS_TEXT = "#CCCCCC"
+COLOR_AXIS_LINE = "#666666"
 DEFAULT_AMP_MIN = -120.0
 DEFAULT_AMP_MAX = 0.0
 DEFAULT_HISTORY_DEPTH = 300
@@ -23,9 +25,16 @@ class WaterfallWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground(COLOR_BACKGROUND)
-        self.plot_widget.getPlotItem().setLabel("bottom", "Frequency", units="Hz")
-        self.plot_widget.getPlotItem().setLabel("left", "Time (frames ago)")
-        self.plot_widget.getPlotItem().invertY(True)
+        plot_item = self.plot_widget.getPlotItem()
+        plot_item.setLabel(
+            "bottom", "Frequency", units="Hz", color=COLOR_AXIS_TEXT
+        )
+        plot_item.setLabel("left", "Time (frames ago)", color=COLOR_AXIS_TEXT)
+        for axis_name in ("bottom", "left"):
+            axis = plot_item.getAxis(axis_name)
+            axis.setTextPen(COLOR_AXIS_TEXT)
+            axis.setPen(COLOR_AXIS_LINE)
+        plot_item.invertY(True)
         self.image_item = pg.ImageItem()
         self.plot_widget.addItem(self.image_item)
         colormap = pg.colormap.get("viridis")

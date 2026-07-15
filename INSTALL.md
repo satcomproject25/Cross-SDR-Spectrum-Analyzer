@@ -96,10 +96,11 @@ Trace holds and averaging reset when the stream is started or reconfigured.
 
 1. Start the application with `python run.py`.
 2. Select **Simulator** (it is selected by default) and press **Start acquisition**.
-3. Two phase-continuous carriers with noise will appear around the selected
-   center frequency. Their levels change continuously.
+3. Two nearby QPSK/OFDM-like occupied carriers with noise will appear around the
+   selected center frequency. Their symbols and levels change continuously.
 4. Enable **Max Hold**, **Min Hold**, and **Average** individually or together.
-   The violet and blue envelopes should separate while the yellow average settles.
+   The violet and blue envelopes should separate while the yellow power average
+   settles into two stable digital-carrier shapes.
 5. Confirm **None** prevents click placement, then choose Marker 1/2/3 and each
    **Trace Marker** option, enable delta mode,
    inspect the waterfall, change center/span/sample rate, and export a CSV or

@@ -38,8 +38,15 @@ class AnalyzerPipelineTests(unittest.TestCase):
         index = int(np.argmax(loud.amplitude))
         self.assertAlmostEqual(quiet.max_hold[index], loud.amplitude[index], places=4)
         self.assertAlmostEqual(quiet.min_hold[index], quiet.amplitude[index], places=4)
+        expected_average = 10.0 * np.log10(
+            (
+                10.0 ** (loud.amplitude[index] / 10.0)
+                + 10.0 ** (quiet.amplitude[index] / 10.0)
+            )
+            / 2.0
+        )
         self.assertAlmostEqual(
-            quiet.average[index], (loud.amplitude[index] + quiet.amplitude[index]) / 2, places=4
+            quiet.average[index], expected_average, places=4
         )
 
     def test_min_hold_ignores_dsp_numerical_floor(self):

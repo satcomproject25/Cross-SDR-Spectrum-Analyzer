@@ -275,22 +275,33 @@ class AcquisitionTests(unittest.TestCase):
         config = AcquisitionConfig("SIMULATOR", 2.44e9, 20e6, 20e6, 20, fft_size=4096)
         acquisition = create_acquisition(config)
         self.assertIsInstance(acquisition, SyntheticAcquisition)
-        acquisition.frame_rate = 120.0
+        acquisition.frame_rate = 1000.0
         frames = []
         statuses = []
 
         def receive(frame):
             frames.append(frame)
-            if len(frames) == 4:
+            if len(frames) == 16:
                 acquisition.stop()
 
         acquisition.run(receive, statuses.append)
 
-        self.assertEqual(len(frames), 4)
-        self.assertEqual(frames[-1].frame_count, 4)
-        self.assertEqual(frames[-1].device_name, "Built-in IQ Simulator")
-        self.assertGreaterEqual(len(frames[-1].peaks), 2)
-        self.assertTrue(np.any(frames[-1].max_hold > frames[-1].min_hold))
+        self.assertEqual(len(frames), 16)
+        frame = frames[-1]
+        self.assertEqual(frame.frame_count, 16)
+        self.assertEqual(frame.device_name, "Built-in IQ Simulator")
+        self.assertGreaterEqual(len(frame.peaks), 2)
+        self.assertTrue(np.any(frame.max_hold > frame.min_hold))
+
+        # The averaged spectrum contains two nearby, occupied digital bands,
+        # not merely two isolated CW bins.
+        average_noise = float(np.median(frame.average))
+        occupied = np.flatnonzero(frame.average > average_noise + 15.0)
+        groups = 1 + int(np.count_nonzero(np.diff(occupied) > 1))
+        self.assertGreater(len(occupied), 300)
+        self.assertEqual(groups, 2)
+        offsets = frame.frequency[occupied] - config.center_frequency
+        self.assertTrue(np.all(np.abs(offsets) < 2e6))
         self.assertTrue(statuses[0].startswith("Connected:"))
         self.assertEqual(statuses[-1], "Idle")
 

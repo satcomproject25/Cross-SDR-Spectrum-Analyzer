@@ -53,8 +53,8 @@ flowchart LR
 In simple terms:
 
 1. `backend/acquisition.py` finds the selected SDR through SoapySDR and opens a
-   continuous receive stream. Simulator mode creates two changing carriers and
-   noise locally.
+   continuous receive stream. Simulator mode creates two nearby QPSK/OFDM-like
+   occupied carriers with noise locally.
 2. Acquisition runs on a background thread so the GUI stays responsive.
 3. `backend/dsp.py` applies a Hann window and computes a 4096-point FFT. It
    converts FFT-bin magnitudes into dBFS and builds the frequency axis.
@@ -87,7 +87,7 @@ Then:
 
 1. Leave **SIMULATOR** selected.
 2. Press **Run**.
-3. Two carriers and a noise floor should appear.
+3. Two nearby digital-carrier bands and a noise floor should appear.
 4. Enable **Max Hold**, **Min Hold**, and **Average**. The traces should separate
    because the simulated carrier levels change over time.
 5. Choose a **Trace Marker** option, then click the spectrum to place a marker.
@@ -202,7 +202,9 @@ receiver configuration live in **Analyzer Setup** on the left. The right-side
 and **Markers** tabs so the spectrum and waterfall remain the visual focus. The
 three tabs always share the full Analysis width equally. Edge-arrow handles hide
 or restore either side dock; with both docks hidden, the central spectrum and
-waterfall expand across the complete workspace.
+waterfall expand across the complete workspace. The interface uses a true black
+background with high-contrast near-black panels, gray borders, white text, and
+cyan interaction accents so controls and plot annotations remain visible.
 
 ### Device and receiver controls
 
@@ -232,13 +234,17 @@ status bar displays that error rather than silently continuing.
 | Clear Write | Cyan | Most recent FFT frame |
 | Max Hold | Violet | Highest value reached by every frequency bin |
 | Min Hold | Blue | Lowest valid displayed-sweep value reached by every frequency bin since Min Hold was enabled |
-| Average | Yellow | Running average of every frequency bin |
+| Average | Yellow | Running linear-power average of every frequency bin, displayed in dBFS |
 
 Max-hold and average history start with acquisition. Min hold starts fresh when
 it is enabled. Trace history resets after the stream is reconfigured or
 restarted. Numerical FFT-floor values are excluded from min hold so a single
 underflow bin cannot pin the trace to -140 dBFS. Multiple traces can be displayed
-at the same time.
+at the same time. Average uses the same power-detector path for Simulator,
+HackRF, and USRP input, so noise-like digital modulation remains visible instead
+of being suppressed by direct arithmetic averaging of dB values. Hardware modes
+show only carriers physically present at their RF inputs; no simulator signal is
+mixed into live SDR samples.
 
 ### Markers
 
