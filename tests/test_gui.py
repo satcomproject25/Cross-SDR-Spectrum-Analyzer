@@ -1,5 +1,8 @@
 import os
+import types
 import unittest
+
+import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -65,6 +68,67 @@ class MainWindowProfileTests(unittest.TestCase):
         self.assertEqual(self.window.marker_selector_btn.current_marker_id(), 0)
         self.assertFalse(self.window.btn_delta_marker.isEnabled())
         self.assertIsNone(self.window.spectrum_widget._active_marker_id)
+
+    def test_waterfall_frequency_range_follows_spectrum_zoom_and_reset(self):
+        frequency = np.linspace(60e6, 80e6, 256)
+        amplitude = np.full(256, -80.0)
+        frame = types.SimpleNamespace(
+            frequency=frequency,
+            amplitude=amplitude,
+            max_hold=amplitude.copy(),
+            min_hold=amplitude.copy(),
+            average=amplitude.copy(),
+            carriers=[],
+        )
+        self.window.spectrum_widget.update_frame(frame)
+        self.window.waterfall_widget.update_frame(frame)
+        self.app.processEvents()
+
+        waterfall = self.window.waterfall_widget
+        image_rect = waterfall.image_item.mapRectToParent(
+            waterfall.image_item.boundingRect()
+        )
+        bin_width = frequency[1] - frequency[0]
+        self.assertAlmostEqual(image_rect.left(), frequency[0] - bin_width / 2.0)
+        self.assertAlmostEqual(image_rect.right(), frequency[-1] + bin_width / 2.0)
+        self.assertAlmostEqual(image_rect.top(), 0.0)
+        self.assertAlmostEqual(image_rect.bottom(), waterfall.history_depth)
+
+        spectrum_view = self.window.spectrum_widget.plot_widget.getViewBox()
+        waterfall_view = self.window.waterfall_widget.plot_widget.getViewBox()
+        spectrum_view.setXRange(68e6, 72e6, padding=0)
+        self.app.processEvents()
+        self.assertTrue(
+            np.allclose(
+                waterfall_view.viewRange()[0],
+                spectrum_view.viewRange()[0],
+            )
+        )
+
+        waterfall_view.autoRange(padding=0)
+        self.app.processEvents()
+        waterfall_range = waterfall_view.viewRange()[0]
+        self.assertLess(waterfall_range[1], 100e6)
+        self.assertGreater(waterfall_range[0], 40e6)
+        self.assertTrue(np.allclose(waterfall_range, spectrum_view.viewRange()[0]))
+
+        shifted_frequency = frequency + 20e6
+        frame.frequency = shifted_frequency
+        self.window.spectrum_widget.update_frame(frame)
+        self.window.waterfall_widget.update_frame(frame)
+        self.assertEqual(
+            self.window.waterfall_widget._frequency_bounds,
+            (float(shifted_frequency[0]), float(shifted_frequency[-1])),
+        )
+
+        self.window.spectrum_widget.reset_zoom()
+        self.app.processEvents()
+        self.assertTrue(
+            np.allclose(
+                waterfall_view.viewRange()[0],
+                spectrum_view.viewRange()[0],
+            )
+        )
 
     def test_x301_and_hackrf_profiles_restore_documented_limits(self):
         self.window.sdr_type_combo.setCurrentIndex(

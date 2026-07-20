@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
+from backend.carrier_detection import CarrierRegion
 from frontend.renderer import (
     COLOR_AUTO_PEAK,
     COLOR_AVERAGE,
@@ -124,6 +125,29 @@ class SpectrumWidgetTests(unittest.TestCase):
         self.widget.set_active_marker(2)
         self.widget.place_active_marker_at_frequency(200.0)
         self.assertIn(2, self.widget._markers)
+
+    def test_carrier_regions_align_to_detected_edge_bins_and_are_reused(self):
+        self.frame.carriers = [
+            CarrierRegion(0, 1, 0, 1, -20.0, -80.0),
+            CarrierRegion(2, 3, 2, 2, -25.0, -80.0),
+        ]
+        self.widget.update_frame(self.frame)
+
+        self.assertEqual(len(self.widget._carrier_regions), 2)
+        self.assertEqual(
+            tuple(self.widget._carrier_regions[0].getRegion()),
+            (100.0, 200.0),
+        )
+        first_region = self.widget._carrier_regions[0]
+
+        self.frame.carriers = [CarrierRegion(1, 2, 1, 1, -20.0, -80.0)]
+        self.widget.update_frame(self.frame)
+        self.assertIs(self.widget._carrier_regions[0], first_region)
+        self.assertEqual(
+            tuple(self.widget._carrier_regions[0].getRegion()),
+            (200.0, 300.0),
+        )
+        self.assertFalse(self.widget._carrier_regions[1].isVisible())
 
 
 if __name__ == "__main__":

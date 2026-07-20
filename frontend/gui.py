@@ -388,6 +388,9 @@ class MainWindow(QMainWindow):
     def _build_central_widgets(self):
         self.spectrum_widget  = SpectrumWidget()
         self.waterfall_widget = WaterfallWidget()
+        self.waterfall_widget.link_frequency_axis(
+            self.spectrum_widget.plot_widget
+        )
 
         center_split = QSplitter(Qt.Orientation.Vertical)
         center_split.addWidget(self.spectrum_widget)
@@ -1050,17 +1053,6 @@ class MainWindow(QMainWindow):
         if self._last_frame_time is not None and now > self._last_frame_time:
             self.lbl_fps.setText(f"FPS: {1.0/(now-self._last_frame_time):.1f}")
         self._last_frame_time = now
-        #temp
-        print(len(frame.carriers))
-        if frame.carriers:
-            print("=" * 50)
-            for i, c in enumerate(frame.carriers, start=1):
-                print(
-                    f"Carrier {i}: "
-                    f"Left={c.left_bin}, "
-                    f"Right={c.right_bin}, "
-                    f"Width={c.right_bin - c.left_bin} bins"
-                )
     # -----------------------------------------------------------------------
     # Marker & Delta Logic
     # -----------------------------------------------------------------------

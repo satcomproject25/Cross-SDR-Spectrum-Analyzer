@@ -6,7 +6,7 @@ from .dsp import DSPEngine
 from .measurements import MeasurementEngine
 from .models import IQFrame, SpectrumFrame
 from .peak import PeakEngine
-from .carrier_detection import CarrierDetectionEngine   
+from .carrier_detection import CarrierDetectionEngine
 from .trace import TraceEngine
 
 
@@ -30,9 +30,7 @@ class AnalyzerPipeline:
         )
         spectrum = self.dsp.process(iq_frame, self.config.span)
         traces = self.traces.update(spectrum)
-        carriers = self.carrier_detector.detect(
-        traces.live
-        )
+        carriers = self.carrier_detector.detect(traces.live)
         measurements = self.measurements.update(traces)
         peaks = self.peaks.find(traces)
         self.frame_count += 1
@@ -53,7 +51,7 @@ class AnalyzerPipeline:
             fft_size=spectrum.fft_size,
             rbw=spectrum.rbw,
             frame_count=traces.frame_count,
-            device_name=self.device_name,   
+            device_name=self.device_name,
             carriers=carriers,
         )
 

@@ -7,7 +7,6 @@ Owner: Developer B (Frontend/GUI)
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph import FillBetweenItem
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
@@ -22,7 +21,9 @@ COLOR_MIN_HOLD    = "#3399FF"
 COLOR_AVERAGE     = "#FFD60A"
 COLOR_AXIS_TEXT   = "#CCCCCC"
 COLOR_AUTO_PEAK   = "#FF3B30"
+COLOR_CARRIER     = "#5FD791"
 TRACE_WIDTH = 1.6
+LEFT_AXIS_WIDTH = 58
 
 MARKER_TRACE_FIELDS = {
     "cw": "amplitude",
@@ -95,6 +96,7 @@ class SpectrumWidget(QWidget):
             axis = pi.getAxis(axis_name)
             axis.setTextPen(COLOR_AXIS_TEXT)
             axis.setPen("#666666")
+        pi.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
         self.plot_widget.setYRange(-120, 0)
 
         # Drag-to-zoom: left-click-drag draws a box, release zooms in
@@ -117,12 +119,8 @@ class SpectrumWidget(QWidget):
         self.curve_max_hold.setVisible(False)
         self.curve_min_hold.setVisible(False)
         self.curve_average.setVisible(False)
-        # --------------------------------------------------
-        # Carrier overlay
-        # --------------------------------------------------
-
-        self._carrier_fill_items = []
-
+        # Reuse region items instead of allocating curves on every FFT frame.
+        self._carrier_regions = []
         self._carrier_show = True
 
     def _init_auto_peak_marker(self):
@@ -493,63 +491,44 @@ class SpectrumWidget(QWidget):
             self.curve_average.setVisible(average)
 
     def _clear_carriers(self):
+        for region in self._carrier_regions:
+            region.hide()
 
-        for item in self._carrier_fill_items:
-            self.plot_widget.removeItem(item)
+    def _new_carrier_region(self):
+        region = pg.LinearRegionItem(
+            values=(0.0, 0.0),
+            movable=False,
+            brush=pg.mkBrush(95, 215, 145, 110),
+            pen=pg.mkPen(COLOR_CARRIER, width=1.0),
+        )
+        region.setZValue(-5)
+        region.hide()
+        self.plot_widget.addItem(region)
+        self._carrier_regions.append(region)
+        return region
 
-        self._carrier_fill_items.clear()
-    
     def _draw_carriers(self, frame):
-
         if not self._carrier_show:
+            self._clear_carriers()
             return
 
-        self._clear_carriers()
+        frequency = np.asarray(frame.frequency)
+        carriers = getattr(frame, "carriers", []) or []
+        visible_count = 0
+        for carrier in carriers:
+            left = int(carrier.left_bin)
+            right = int(carrier.right_bin)
+            if left < 0 or right >= frequency.size or right <= left:
+                continue
+            if visible_count == len(self._carrier_regions):
+                self._new_carrier_region()
+            region = self._carrier_regions[visible_count]
+            region.setRegion((float(frequency[left]), float(frequency[right])))
+            region.show()
+            visible_count += 1
 
-        if not frame.carriers:
-            return
-
-        freq = frame.frequency
-        amp = frame.amplitude
-
-        # Get current visible Y-axis range
-        y_min, y_max = self.plot_widget.getViewBox().viewRange()[1]
-
-        # Fill should span the entire visible plot
-        upper = np.full_like(amp, y_max)
-        lower = np.full_like(amp, y_min)
-
-        for carrier in frame.carriers:
-
-            left = carrier.left_bin
-            right = carrier.right_bin
-
-            x = freq[left:right + 1]
-
-            top = upper[left:right + 1]
-            bottom = lower[left:right + 1]
-
-            upper_curve = pg.PlotCurveItem(
-                x,
-                top,
-                pen=None,
-            )
-
-            lower_curve = pg.PlotCurveItem(
-                x,
-                bottom,
-                pen=None,
-            )
-
-            fill = FillBetweenItem(
-                upper_curve,
-                lower_curve,
-                brush=pg.mkBrush(95, 215, 145, 110)
-            )
-
-            self.plot_widget.addItem(fill)
-
-            self._carrier_fill_items.append(fill)
+        for region in self._carrier_regions[visible_count:]:
+            region.hide()
     # ------------------------------------------------------------------
     # Frame update (called per FFT frame from gui.py)
     # ------------------------------------------------------------------
@@ -613,8 +592,7 @@ class SpectrumWidget(QWidget):
         self.plot_widget.setYRange(ref_dbm - span_db, ref_dbm)
 
     def set_carrier_visibility(self, visible):
-
-        self._carrier_show = visible
+        self._carrier_show = bool(visible)
 
         if not visible:
             self._clear_carriers()

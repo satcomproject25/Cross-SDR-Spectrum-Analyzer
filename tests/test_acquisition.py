@@ -300,6 +300,7 @@ class AcquisitionTests(unittest.TestCase):
         groups = 1 + int(np.count_nonzero(np.diff(occupied) > 1))
         self.assertGreater(len(occupied), 300)
         self.assertEqual(groups, 2)
+        self.assertEqual(len(frame.carriers), 2)
         offsets = frame.frequency[occupied] - config.center_frequency
         self.assertTrue(np.all(np.abs(offsets) < 2e6))
         self.assertTrue(statuses[0].startswith("Connected:"))
