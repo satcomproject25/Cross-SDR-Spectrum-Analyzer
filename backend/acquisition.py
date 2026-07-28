@@ -15,6 +15,7 @@ import numpy as np
 from .controller import AnalyzerPipeline
 # from .calibration import load_device_calibration, interpolated_offset_hz  // table path, unused: error is linear.
 from .calibration import load_device_calibration
+from .power_calibration import resolve_power_offset_db
 from .models import AcquisitionConfig, DeviceInfo
 
 
@@ -243,6 +244,8 @@ class HackRFAcquisition:
         self._device = None
         self._stream = None
         self._reset_min_hold_event = threading.Event()
+        # dBFS -> dBm offset, resolved once at bring-up. None => stay in dBFS.
+        self._power_offset_db = None
 
     def stop(self):
         self._stop_event.set()
@@ -342,6 +345,23 @@ class HackRFAcquisition:
             frequency_error_hz = fixed_error_hz + driver_freq * ppm_error * 1e-6
             calibrated_freq = driver_freq - frequency_error_hz
 
+            # Power calibration: resolve the dBFS->dBm offset for the live VGA and
+            # centre frequency. Guarded so a calibration taken at a different gain
+            # chain is never applied silently -- if the live LNA/AMP disagree with
+            # what the table was measured at, fall back to dBFS (offset = None).
+            cal_lna = calibration.get("power_cal_lna_db")
+            cal_amp = calibration.get("power_cal_amp_db")
+            gain_matches = (
+                (cal_lna is None or float(cal_lna) == HACKRF_LNA_DB)
+                and (cal_amp is None or float(cal_amp) == HACKRF_AMP_DB)
+            )
+            if gain_matches:
+                self._power_offset_db = resolve_power_offset_db(
+                    calibration, vga_db=applied_gain, freq_hz=driver_freq
+                )
+            else:
+                self._power_offset_db = None
+
             if abs(actual_rate - self.config.sample_rate) / self.config.sample_rate > 0.01:
                 raise AcquisitionError(
                     f"HackRF selected {actual_rate/1e6:.3f} Msps instead of the requested "
@@ -395,6 +415,10 @@ class HackRFAcquisition:
                 "frequency_ppm_error": str(ppm_error),
                 "frequency_correction_hz": str(frequency_error_hz),
                 "display_center_frequency_hz": str(calibrated_freq),
+                "power_offset_db": (
+                    "none" if self._power_offset_db is None
+                    else f"{self._power_offset_db:.2f}"
+                ),
             },
         )
 
@@ -409,7 +433,9 @@ class HackRFAcquisition:
             soapy, info = self._open()
             if status_callback:
                 status_callback(f"Connected: {info.device_name}")
-            pipeline = AnalyzerPipeline(self.config, info.device_name)
+            pipeline = AnalyzerPipeline(
+                self.config, info.device_name, self._power_offset_db
+            )
 
             block = np.empty(self.config.fft_size, dtype=np.complex64)
             filled = 0

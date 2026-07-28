@@ -92,6 +92,7 @@ class SpectrumFrame:
     rbw: float
     frame_count: int
     device_name: str = ""
+    unit: str = "dBFS"  # or "dBm" if calibrated
     carriers: list = field(default_factory=list)
 
 
