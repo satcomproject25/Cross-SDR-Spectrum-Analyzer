@@ -1,7 +1,7 @@
 """Continuous receive-only SDR acquisition through SoapySDR.
 
-HackRF One and Ettus USRP use separate bring-up paths so device-specific
-configuration cannot leak from one driver into the other.
+HackRF One, Ettus USRP, and ADALM-Pluto use separate bring-up paths so
+device-specific configuration cannot leak from one driver into the other.
 """
 
 from __future__ import annotations
@@ -14,12 +14,13 @@ import numpy as np
 
 from .controller import AnalyzerPipeline
 # from .calibration import load_device_calibration, interpolated_offset_hz // NON-LINEAR SCALE.
-from .calibration import load_device_calibration
+from .calibration import calibrated_power_offset, load_device_calibration
 from .models import AcquisitionConfig, DeviceInfo
 
 
 HACKRF_DRIVER = "hackrf"
 USRP_DRIVER = "uhd"
+PLUTO_DRIVER = "plutosdr"
 
 # HackRF One hardware limits.
 HACKRF_MIN_FREQ = 1e6
@@ -31,6 +32,14 @@ HACKRF_MAX_RATE = 20e6
 # wide-band daughterboard and a 10 GigE or PCIe host connection.
 USRP_X3X0_MAX_RATE = 200e6
 USRP_X3X0_MAX_SPAN = 160e6
+
+# Factory ADALM-Pluto limits. Modified firmware may expose a wider tuning range
+# and bandwidth, but the application validates against the supported profile.
+PLUTO_MIN_FREQ = 325e6
+PLUTO_MAX_FREQ = 3.8e9
+PLUTO_MIN_RATE = 65.1e3
+PLUTO_MAX_RATE = 61.44e6
+PLUTO_MAX_SPAN = 20e6
 
 # Front-end amp. Keep OFF for signal-generator work: +14 dB into a HackRF that is
 # already fed a strong CW tone will compress the ADC and can damage the LNA.
@@ -46,6 +55,7 @@ _OPEN_LOCK = threading.Lock()
 # Keep UHD discovery/make calls serialized without changing the proven HackRF
 # locking path. The two drivers can therefore be stopped and opened independently.
 _USRP_OPEN_LOCK = threading.Lock()
+_PLUTO_OPEN_LOCK = threading.Lock()
 
 # Set True while bringing up hardware. Makes SoapyHackRF print
 #   [INFO]  Opening HackRF One #0 ...
@@ -67,10 +77,28 @@ def create_acquisition(config: AcquisitionConfig):
         return HackRFAcquisition(config)
     if device_type == "USRP":
         return USRPAcquisition(config)
+    if device_type == "PLUTO":
+        return PlutoAcquisition(config)
     raise AcquisitionError(
         f"Unsupported device type '{config.device_type}'. This build supports "
-        "SIMULATOR, HACKRF, and USRP only."
+        "SIMULATOR, HACKRF, USRP, and PLUTO only."
     )
+
+
+def _pipeline_for_device(
+    config: AcquisitionConfig,
+    info: DeviceInfo,
+    calibration: dict | None = None,
+) -> AnalyzerPipeline:
+    """Build a pipeline with the selected device's serial-specific power scale."""
+    if calibration is None:
+        calibration = load_device_calibration(
+            config.device_type, info.serial_number
+        )
+    offset = calibrated_power_offset(calibration)
+    info.details["power_calibrated"] = str(offset is not None)
+    info.details["power_offset_db"] = "" if offset is None else str(offset)
+    return AnalyzerPipeline(config, info.device_name, power_offset_db=offset)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +161,14 @@ class SyntheticAcquisition:
     ):
         if status_callback:
             status_callback("Connected: Built-in IQ Simulator")
-        pipeline = AnalyzerPipeline(self.config, "Built-in IQ Simulator")
+        simulator_info = DeviceInfo(
+            connected=True,
+            device_name="Built-in IQ Simulator",
+            driver="simulator",
+            serial_number="built-in",
+            hardware_key="SIMULATOR",
+        )
+        pipeline = _pipeline_for_device(self.config, simulator_info)
         rng = np.random.default_rng(20260711)
         started = time.monotonic()
         deadline = started
@@ -222,6 +257,17 @@ def enumerate_usrp() -> list[dict[str, str]]:
     return devices
 
 
+def enumerate_pluto() -> list[dict[str, str]]:
+    """Discover only ADALM-Pluto devices exposed by SoapyPlutoSDR."""
+    soapy = _load_soapy()
+    devices = []
+    for entry in soapy.Device.enumerate(dict(driver=PLUTO_DRIVER)):
+        item = {str(k): str(entry[k]) for k in entry.keys()}
+        if item.get("driver", "").lower() == PLUTO_DRIVER:
+            devices.append(item)
+    return devices
+
+
 # Back-compat shim for backend/main.py and the tests.
 def enumerate_devices(device_type: str = "HACKRF") -> list[dict[str, str]]:
     device_type = device_type.upper()
@@ -229,6 +275,8 @@ def enumerate_devices(device_type: str = "HACKRF") -> list[dict[str, str]]:
         return enumerate_hackrf()
     if device_type == "USRP":
         return enumerate_usrp()
+    if device_type == "PLUTO":
+        return enumerate_pluto()
     raise AcquisitionError(f"Unsupported SDR type: {device_type}")
 
 
@@ -414,7 +462,7 @@ class HackRFAcquisition:
             soapy, info = self._open()
             if status_callback:
                 status_callback(f"Connected: {info.device_name}")
-            pipeline = AnalyzerPipeline(self.config, info.device_name)
+            pipeline = _pipeline_for_device(self.config, info)
 
             block = np.empty(self.config.fft_size, dtype=np.complex64)
             filled = 0
@@ -657,7 +705,7 @@ class USRPAcquisition:
             soapy, info = self._open()
             if status_callback:
                 status_callback(f"Connected: {info.device_name}")
-            pipeline = AnalyzerPipeline(self.config, info.device_name)
+            pipeline = _pipeline_for_device(self.config, info)
             block = np.empty(self.config.fft_size, dtype=np.complex64)
             filled = 0
             last_emit = 0.0
@@ -697,6 +745,246 @@ class USRPAcquisition:
                         else str(result.ret)
                     )
                     raise AcquisitionError(f"USRP stream read failed: {detail}")
+        finally:
+            self._close()
+            if status_callback:
+                status_callback("Idle")
+
+    def _close(self):
+        device, stream, soapy = self._device, self._stream, self._soapy
+        if device is not None and stream is not None:
+            try:
+                device.deactivateStream(stream)
+            except Exception:
+                pass
+            try:
+                device.closeStream(stream)
+            except Exception:
+                pass
+        if device is not None:
+            try:
+                if soapy is None:
+                    soapy = _load_soapy()
+                soapy.Device.unmake(device)
+            except Exception:
+                pass
+        self._stream = None
+        self._device = None
+        self._soapy = None
+
+
+# ---------------------------------------------------------------------------
+# Analog Devices ADALM-Pluto through SoapyPlutoSDR, receive only
+# ---------------------------------------------------------------------------
+class PlutoAcquisition:
+    """Configure and continuously stream one ADALM-Pluto."""
+
+    def __init__(self, config: AcquisitionConfig):
+        self.config = self._validate(config)
+        self._stop_event = threading.Event()
+        self._reset_min_hold_event = threading.Event()
+        self._soapy = None
+        self._device = None
+        self._stream = None
+
+    @staticmethod
+    def _validate(config: AcquisitionConfig) -> AcquisitionConfig:
+        if not (PLUTO_MIN_FREQ <= config.center_frequency <= PLUTO_MAX_FREQ):
+            raise AcquisitionError(
+                f"Center frequency {config.center_frequency/1e6:.3f} MHz is outside "
+                f"the ADALM-Pluto range ({PLUTO_MIN_FREQ/1e6:.0f} - "
+                f"{PLUTO_MAX_FREQ/1e9:.1f} GHz)."
+            )
+        if not (PLUTO_MIN_RATE <= config.sample_rate <= PLUTO_MAX_RATE):
+            raise AcquisitionError(
+                f"Pluto sample rate must be between {PLUTO_MIN_RATE/1e3:.1f} kS/s "
+                f"and {PLUTO_MAX_RATE/1e6:.2f} MS/s."
+            )
+        if config.span <= 0 or config.span > PLUTO_MAX_SPAN:
+            raise AcquisitionError(
+                f"Pluto span must be above 0 and no more than "
+                f"{PLUTO_MAX_SPAN/1e6:.2f} MHz."
+            )
+        if config.span > config.sample_rate:
+            raise AcquisitionError("Pluto span cannot exceed its sample rate.")
+        return config
+
+    def stop(self):
+        self._stop_event.set()
+
+    def reset_min_hold(self):
+        self._reset_min_hold_event.set()
+
+    @staticmethod
+    def _selector(match: dict[str, str]) -> str:
+        parts = [f"driver={PLUTO_DRIVER}"]
+        # URI is the most reliable discriminator for both USB and network Pluto.
+        for key in ("uri", "serial", "hw_serial"):
+            value = match.get(key)
+            if value:
+                parts.append(f"{key}={value}")
+                break
+        return ",".join(parts)
+
+    def _apply_gain(self, direction, channel, requested_gain: float) -> float:
+        gain = float(requested_gain)
+        try:
+            gain_range = self._device.getGainRange(direction, channel)
+            gain = max(float(gain_range.minimum()), min(float(gain_range.maximum()), gain))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+        try:
+            if self._device.hasGainMode(direction, channel):
+                self._device.setGainMode(direction, channel, False)
+        except (AttributeError, RuntimeError):
+            pass
+
+        self._device.setGain(direction, channel, gain)
+        return gain
+
+    def _open(self):
+        with _PLUTO_OPEN_LOCK:
+            return self._open_locked()
+
+    def _open_locked(self):
+        soapy = _load_soapy()
+        self._soapy = soapy
+        matches = enumerate_pluto()
+        if not matches:
+            raise AcquisitionError(
+                "No ADALM-Pluto found by SoapyPlutoSDR. Check USB/network and run "
+                "'iio_info -s' and 'SoapySDRUtil --find=\"driver=plutosdr\"'."
+            )
+        if len(matches) > 1:
+            raise AcquisitionError(
+                f"{len(matches)} PlutoSDRs found. Connect exactly one before starting."
+            )
+
+        match = matches[0]
+        self._device = soapy.Device(self._selector(match))
+        direction = soapy.SOAPY_SDR_RX
+        channel = int(self.config.channel)
+
+        try:
+            self._device.setSampleRate(direction, channel, self.config.sample_rate)
+            self._device.setFrequency(direction, channel, self.config.center_frequency)
+            try:
+                self._device.setBandwidth(
+                    direction, channel, min(self.config.span, self.config.sample_rate)
+                )
+            except (AttributeError, RuntimeError):
+                pass
+
+            applied_gain = self._apply_gain(direction, channel, self.config.gain)
+            actual_rate = float(self._device.getSampleRate(direction, channel))
+            actual_freq = float(self._device.getFrequency(direction, channel))
+            if actual_rate <= 0 or (
+                abs(actual_rate - self.config.sample_rate) / self.config.sample_rate > 0.01
+            ):
+                raise AcquisitionError(
+                    f"Pluto selected {actual_rate/1e6:.3f} MS/s instead of the "
+                    f"requested {self.config.sample_rate/1e6:.3f} MS/s."
+                )
+
+            self.config = AcquisitionConfig(
+                device_type="PLUTO",
+                center_frequency=actual_freq,
+                sample_rate=actual_rate,
+                span=min(self.config.span, actual_rate),
+                gain=applied_gain,
+                fft_size=self.config.fft_size,
+                channel=channel,
+            )
+            self._stream = self._device.setupStream(
+                direction, soapy.SOAPY_SDR_CF32, [channel]
+            )
+            rc = self._device.activateStream(self._stream)
+            if rc not in (None, 0):
+                detail = soapy.errToStr(rc) if hasattr(soapy, "errToStr") else str(rc)
+                raise AcquisitionError(f"Pluto activateStream failed ({rc}: {detail}).")
+        except Exception as exc:
+            self._close()
+            if isinstance(exc, AcquisitionError):
+                raise
+            raise AcquisitionError(f"Could not configure the ADALM-Pluto: {exc}") from exc
+
+        details = dict(match)
+        try:
+            hardware_info = self._device.getHardwareInfo()
+            details.update(
+                {str(key): str(hardware_info[key]) for key in hardware_info.keys()}
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+        serial = (
+            details.get("serial")
+            or details.get("hw_serial")
+            or details.get("usb,serial")
+            or "Unknown"
+        )
+        return soapy, DeviceInfo(
+            connected=True,
+            device_name=match.get("label", match.get("hardware", "ADALM-Pluto")),
+            driver=PLUTO_DRIVER,
+            serial_number=serial,
+            hardware_key=details.get(
+                "hardware", details.get("hw_model", "ADALM-PLUTO")
+            ),
+            details=details,
+        )
+
+    def run(
+        self,
+        frame_callback: Callable[[object], None],
+        status_callback: Callable[[str], None] | None = None,
+    ):
+        soapy = None
+        try:
+            soapy, info = self._open()
+            if status_callback:
+                status_callback(f"Connected: {info.device_name}")
+            pipeline = _pipeline_for_device(self.config, info)
+            block = np.empty(self.config.fft_size, dtype=np.complex64)
+            filled = 0
+            last_emit = 0.0
+            last_sample = time.monotonic()
+            timeout_code = getattr(soapy, "SOAPY_SDR_TIMEOUT", -1)
+            overflow_code = getattr(soapy, "SOAPY_SDR_OVERFLOW", -4)
+
+            while not self._stop_event.is_set():
+                result = self._device.readStream(
+                    self._stream,
+                    [block[filled:]],
+                    self.config.fft_size - filled,
+                    timeoutUs=200_000,
+                )
+                if result.ret > 0:
+                    last_sample = time.monotonic()
+                    filled += result.ret
+                    if filled == self.config.fft_size:
+                        now = time.monotonic()
+                        if now - last_emit >= 1.0 / 30.0:
+                            if self._reset_min_hold_event.is_set():
+                                pipeline.traces.reset_min_hold()
+                                self._reset_min_hold_event.clear()
+                            frame_callback(pipeline.process(block.copy()))
+                            last_emit = now
+                        filled = 0
+                elif result.ret == 0 or result.ret in (timeout_code, overflow_code):
+                    if time.monotonic() - last_sample > 5.0:
+                        raise AcquisitionError(
+                            "Pluto is configured but has delivered no IQ samples for "
+                            "5 s. Check it with 'iio_info -s'."
+                        )
+                else:
+                    detail = (
+                        soapy.errToStr(result.ret)
+                        if hasattr(soapy, "errToStr")
+                        else str(result.ret)
+                    )
+                    raise AcquisitionError(f"Pluto stream read failed: {detail}")
         finally:
             self._close()
             if status_callback:

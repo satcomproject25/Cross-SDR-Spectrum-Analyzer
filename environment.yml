@@ -10,5 +10,7 @@ dependencies:
   - soapysdr
   - soapysdr-module-hackrf
   - soapysdr-module-uhd
+  - soapysdr-module-plutosdr
   - hackrf
   - uhd
+  - libiio

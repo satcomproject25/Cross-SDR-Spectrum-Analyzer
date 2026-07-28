@@ -149,6 +149,48 @@ class SpectrumWidgetTests(unittest.TestCase):
         )
         self.assertFalse(self.widget._carrier_regions[1].isVisible())
 
+    def test_calibrated_dbm_fields_drive_all_display_traces(self):
+        calibrated = types.SimpleNamespace(
+            frequency=self.frame.frequency,
+            amplitude=self.frame.amplitude,
+            max_hold=self.frame.max_hold,
+            min_hold=self.frame.min_hold,
+            average=self.frame.average,
+            amplitude_dbm=self.frame.amplitude + 30.0,
+            max_hold_dbm=self.frame.max_hold + 30.0,
+            min_hold_dbm=self.frame.min_hold + 30.0,
+            average_dbm=self.frame.average + 30.0,
+            carriers=[],
+        )
+        self.widget.set_trace_mode(max_hold=True, min_hold=True, average=True)
+        self.widget.update_frame(calibrated)
+
+        self.assertEqual(self.widget._amplitude_unit, "dBm")
+        self.assertTrue(
+            np.array_equal(
+                self.widget.curve_clear_write.getData()[1],
+                calibrated.amplitude_dbm,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                self.widget.curve_max_hold.getData()[1],
+                calibrated.max_hold_dbm,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                self.widget.curve_min_hold.getData()[1],
+                calibrated.min_hold_dbm,
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                self.widget.curve_average.getData()[1],
+                calibrated.average_dbm,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

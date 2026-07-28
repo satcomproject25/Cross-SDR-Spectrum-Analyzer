@@ -2,6 +2,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
+from .amplitude import trace_amplitude
+
 COLOR_BACKGROUND = "#000000"
 COLOR_AXIS_TEXT = "#CCCCCC"
 COLOR_AXIS_LINE = "#666666"
@@ -55,7 +57,7 @@ class WaterfallWidget(QWidget):
         self._buffer = np.full((self.history_depth, num_bins), self._amp_min, dtype=np.float32)
 
     def update_frame(self, frame):
-        amplitude = frame.amplitude
+        amplitude = trace_amplitude(frame, "amplitude")
         frequency = frame.frequency
         num_bins = amplitude.shape[0]
         geometry_changed = False

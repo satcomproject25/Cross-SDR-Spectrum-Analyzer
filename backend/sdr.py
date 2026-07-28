@@ -82,10 +82,21 @@ class SDR:
             )
 
         device_type = device_type.upper()
-        driver = "hackrf" if device_type == "HACKRF" else "uhd"
+        driver = {
+            "HACKRF": "hackrf",
+            "USRP": "uhd",
+            "PLUTO": "plutosdr",
+        }.get(device_type)
+        if driver is None:
+            raise AcquisitionError(f"Unsupported SDR type: {device_type}")
         selector = f"driver={driver}"
         if device_type == "USRP" and matches[0].get("serial"):
             selector += f",serial={matches[0]['serial']}"
+        elif device_type == "PLUTO":
+            for key in ("uri", "serial", "hw_serial"):
+                if matches[0].get(key):
+                    selector += f",{key}={matches[0][key]}"
+                    break
         device = soapy.Device(selector)
         direction = soapy.SOAPY_SDR_RX
         stream = None
@@ -157,7 +168,12 @@ class SDR:
             connected=True,
             device_name=label,
             driver=matches[0].get("driver", "Unknown"),
-            serial_number=matches[0].get("serial", "Unknown"),
+            serial_number=(
+                matches[0].get("serial")
+                or matches[0].get("hw_serial")
+                or matches[0].get("usb,serial")
+                or "Unknown"
+            ),
             hardware_key=matches[0].get("type", matches[0].get("hardware", "Unknown")),
             details=details,
         )

@@ -156,6 +156,66 @@ class MainWindowProfileTests(unittest.TestCase):
             self.window.sample_rate_combo.count() - 1
         ), "20")
 
+    def test_pluto_profile_exposes_supported_limits(self):
+        self.window.sdr_type_combo.setCurrentIndex(
+            self.window.sdr_type_combo.findData("PLUTO")
+        )
+        pluto = self.window._acquisition_config()
+        self.assertEqual(pluto.device_type, "PLUTO")
+        self.assertEqual(pluto.sample_rate, 4e6)
+        self.assertEqual(pluto.span, 4e6)
+        self.assertEqual(self.window.center_freq_ctrl._min_hz, 325e6)
+        self.assertEqual(self.window.center_freq_ctrl._max_hz, 3.8e9)
+        self.assertEqual(self.window.span_ctrl._max_hz, 20e6)
+        self.assertEqual(self.window.sample_rate_combo.itemText(
+            self.window.sample_rate_combo.count() - 1
+        ), "61.44")
+
+    def test_calibrated_frame_updates_measurements_and_status_in_dbm(self):
+        frequency = np.linspace(100e6, 101e6, 16)
+        raw = np.linspace(-90.0, -30.0, 16)
+        calibrated = raw + 42.0
+        peak = types.SimpleNamespace(
+            frequency=float(frequency[-1]),
+            amplitude=float(raw[-1]),
+        )
+        peak_dbm = types.SimpleNamespace(
+            frequency=float(frequency[-1]),
+            amplitude=float(calibrated[-1]),
+        )
+        frame = types.SimpleNamespace(
+            frequency=frequency,
+            amplitude=raw,
+            max_hold=raw.copy(),
+            min_hold=raw.copy(),
+            average=raw.copy(),
+            amplitude_dbm=calibrated,
+            max_hold_dbm=calibrated.copy(),
+            min_hold_dbm=calibrated.copy(),
+            average_dbm=calibrated.copy(),
+            peaks=[peak],
+            peaks_dbm=[peak_dbm],
+            noise_floor=float(np.median(raw)),
+            noise_floor_dbfs=float(np.median(raw)),
+            noise_floor_dbm=float(np.median(calibrated)),
+            channel_power=-20.0,
+            channel_power_dbfs=-20.0,
+            channel_power_dbm=22.0,
+            bandwidth=500e3,
+            fft_size=4096,
+            rbw=1e3,
+            carriers=[],
+        )
+
+        self.window._on_frame_ready(frame)
+
+        self.assertEqual(self.window.lbl_peak_status.text(), "Peak: 12.00 dBm")
+        self.assertEqual(self.window.lbl_meas_peak_amp.text(), "12.00 dBm")
+        self.assertEqual(self.window.lbl_meas_noise.text(), "-18.00 dBm")
+        self.assertEqual(self.window.lbl_meas_chan_pwr.text(), "22.00 dBm")
+        self.assertEqual(self.window.spectrum_widget._amplitude_unit, "dBm")
+        self.assertEqual(self.window.delta_readout._amplitude_unit, "dBm")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
+from typing import Any
 
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "calibration.json"
 
 
-def load_device_calibration(device_type: str, serial: str = "") -> dict[str, float | None]:
+def load_device_calibration(device_type: str, serial: str = "") -> dict[str, Any]:
     """Return wildcard calibration merged with a serial-specific override."""
     path = Path(os.environ.get("FREQANALYZER_CALIBRATION", DEFAULT_PATH))
-    result: dict[str, float | None] = {
+    result: dict[str, Any] = {
         "frequency_axis_offset_hz": 0.0,
         "power_offset_db": None,
     }
@@ -26,6 +28,18 @@ def load_device_calibration(device_type: str, serial: str = "") -> dict[str, flo
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, AttributeError):
         return result
     return result
+
+
+def calibrated_power_offset(calibration: dict[str, Any]) -> float | None:
+    """Return a finite dBFS-to-dBm offset, or ``None`` when uncalibrated."""
+    value = calibration.get("power_offset_db")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        offset = float(value)
+    except (TypeError, ValueError):
+        return None
+    return offset if math.isfinite(offset) else None
 
 # IF OFFSET DOES NOT SCALE LINEARLY, USE THIS
 # REMOVE IF IT SCALES LINEARLY

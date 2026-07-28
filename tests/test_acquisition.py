@@ -7,6 +7,7 @@ import numpy as np
 from backend.acquisition import (
     AcquisitionError,
     HackRFAcquisition,
+    PlutoAcquisition,
     SyntheticAcquisition,
     SoapyAcquisition,
     USRPAcquisition,
@@ -109,6 +110,31 @@ class FakeUSRPDevice(FakeDevice):
         self.gain = value
 
 
+class FakePlutoDevice(FakeUSRPDevice):
+    last_instance = None
+
+    @staticmethod
+    def enumerate(hint=None):
+        if hint and hint.get("driver") == "plutosdr":
+            return [
+                {
+                    "driver": "plutosdr",
+                    "label": "Fake Pluto",
+                    "hardware": "ADALM-PLUTO",
+                    "hw_serial": "P123",
+                    "uri": "usb:1.2.3",
+                }
+            ]
+        return []
+
+    def __init__(self, selector):
+        super().__init__(selector)
+        FakePlutoDevice.last_instance = self
+
+    def getHardwareInfo(self):
+        return {"hw_serial": "P123", "hw_model": "Analog Devices PlutoSDR Rev.C"}
+
+
 class AcquisitionTests(unittest.TestCase):
     def test_x300_profile_rejects_unsupported_rate_and_span(self):
         with self.assertRaises(AcquisitionError):
@@ -132,6 +158,61 @@ class AcquisitionTests(unittest.TestCase):
         self.assertIsInstance(selected_usrp, USRPAcquisition)
         self.assertIsInstance(second_hackrf, HackRFAcquisition)
         self.assertIsNot(first_hackrf, second_hackrf)
+
+    def test_factory_adds_pluto_without_changing_existing_device_paths(self):
+        pluto = create_acquisition(
+            AcquisitionConfig("PLUTO", 2.44e9, 2e6, 2e6, 20)
+        )
+        self.assertIsInstance(pluto, PlutoAcquisition)
+        self.assertIsInstance(
+            create_acquisition(
+                AcquisitionConfig("HACKRF", 100e6, 2e6, 2e6, 20)
+            ),
+            HackRFAcquisition,
+        )
+        self.assertIsInstance(
+            create_acquisition(
+                AcquisitionConfig("USRP", 100e6, 2e6, 2e6, 20)
+            ),
+            USRPAcquisition,
+        )
+
+    def test_pluto_is_discovered_configured_calibrated_and_streamed(self):
+        FakePlutoDevice.last_instance = None
+        fake_soapy = types.SimpleNamespace(
+            Device=FakePlutoDevice,
+            SOAPY_SDR_RX=1,
+            SOAPY_SDR_CF32="CF32",
+            SOAPY_SDR_TIMEOUT=-1,
+            SOAPY_SDR_OVERFLOW=-4,
+        )
+        config = AcquisitionConfig("PLUTO", 2.44e9, 2e6, 1e6, 20, fft_size=4096)
+        acquisition = create_acquisition(config)
+        frames = []
+
+        def receive(frame):
+            frames.append(frame)
+            acquisition.stop()
+
+        with patch("backend.acquisition._load_soapy", return_value=fake_soapy), patch(
+            "backend.acquisition.load_device_calibration",
+            return_value={"power_offset_db": 35.0},
+        ) as load_calibration:
+            acquisition.run(receive)
+
+        device = FakePlutoDevice.last_instance
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(device.selector, "driver=plutosdr,uri=usb:1.2.3")
+        self.assertEqual(device.sample_rate, 2e6)
+        self.assertEqual(device.frequency, 2.44e9)
+        self.assertEqual(device.bandwidth, 1e6)
+        self.assertEqual(device.gain, 20)
+        self.assertEqual(frames[0].device_name, "Fake Pluto")
+        load_calibration.assert_called_once_with("PLUTO", "P123")
+        self.assertTrue(frames[0].power_calibrated)
+        self.assertTrue(
+            np.allclose(frames[0].amplitude_dbm, frames[0].amplitude_dbfs + 35.0)
+        )
 
     def test_usrp_is_discovered_configured_and_streamed_only_on_run(self):
         FakeUSRPDevice.last_instance = None
@@ -270,6 +351,32 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(device.gain, 20)
         self.assertEqual(info.driver, "uhd")
         self.assertEqual(info.hardware_key, "b200")
+
+    def test_sdr_diagnostic_uses_pluto_uri_and_generic_gain(self):
+        fake_soapy = types.SimpleNamespace(
+            Device=FakePlutoDevice,
+            SOAPY_SDR_RX=1,
+            SOAPY_SDR_CF32="CF32",
+        )
+        match = {
+            "driver": "plutosdr",
+            "label": "Fake Pluto",
+            "hardware": "ADALM-PLUTO",
+            "hw_serial": "P123",
+            "uri": "usb:1.2.3",
+        }
+        with patch("backend.sdr._load_soapy", return_value=fake_soapy), patch(
+            "backend.sdr.enumerate_devices", return_value=[match]
+        ):
+            info = SDR().configure_receive(
+                "PLUTO", 2.44e9, 2e6, 20, channel=0
+            )
+
+        device = FakePlutoDevice.last_instance
+        self.assertEqual(device.selector, "driver=plutosdr,uri=usb:1.2.3")
+        self.assertEqual(device.gain, 20)
+        self.assertEqual(info.driver, "plutosdr")
+        self.assertEqual(info.serial_number, "P123")
 
     def test_realtime_simulator_uses_normal_pipeline(self):
         config = AcquisitionConfig("SIMULATOR", 2.44e9, 20e6, 20e6, 20, fft_size=4096)

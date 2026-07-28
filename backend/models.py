@@ -73,7 +73,12 @@ class MeasurementData:
 
 @dataclass
 class SpectrumFrame:
-    """Flat frame contract consumed directly by the frontend."""
+    """Flat frame contract consumed directly by the frontend.
+
+    The legacy amplitude fields remain raw dBFS for compatibility. Frontends
+    should use the explicitly named ``*_dbm`` fields when ``power_calibrated``
+    is true.
+    """
 
     frequency: np.ndarray
     amplitude: np.ndarray
@@ -93,6 +98,22 @@ class SpectrumFrame:
     frame_count: int
     device_name: str = ""
     carriers: list = field(default_factory=list)
+    amplitude_dbfs: np.ndarray | None = None
+    max_hold_dbfs: np.ndarray | None = None
+    min_hold_dbfs: np.ndarray | None = None
+    average_dbfs: np.ndarray | None = None
+    amplitude_dbm: np.ndarray | None = None
+    max_hold_dbm: np.ndarray | None = None
+    min_hold_dbm: np.ndarray | None = None
+    average_dbm: np.ndarray | None = None
+    peaks_dbm: list[Peak] = field(default_factory=list)
+    noise_floor_dbfs: float | None = None
+    channel_power_dbfs: float | None = None
+    noise_floor_dbm: float | None = None
+    channel_power_dbm: float | None = None
+    power_offset_db: float | None = None
+    power_calibrated: bool = False
+    amplitude_unit: str = "dBFS"
 
 
 # Legacy file-capture models are retained for old recordings and scripts.

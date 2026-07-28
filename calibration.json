@@ -1,5 +1,12 @@
 {
   "devices": {
+    "SIMULATOR": {
+      "default": {
+        "frequency_axis_offset_hz": 0.0,
+        "power_offset_db": 0.0
+      },
+      "serials": {}
+    },
     "HACKRF": {
       "default": {
         "ppm_offset": 22.5,
@@ -15,6 +22,13 @@
     "USRP": {
       "default": {
         "ppm_offset": 0.0,
+        "power_offset_db": null
+      },
+      "serials": {}
+    },
+    "PLUTO": {
+      "default": {
+        "frequency_axis_offset_hz": 0.0,
         "power_offset_db": null
       },
       "serials": {}

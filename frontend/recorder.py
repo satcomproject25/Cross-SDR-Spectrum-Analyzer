@@ -37,18 +37,35 @@ class Recorder:
         if not path:
             return None
         frequency = frame.frequency
-        amplitude = frame.amplitude
+        amplitude_dbfs = getattr(frame, "amplitude_dbfs", None)
+        if amplitude_dbfs is None:
+            amplitude_dbfs = frame.amplitude
         header = ["frequency_hz", "amplitude_dbfs"]
-        columns = [frequency, amplitude]
-        if getattr(frame, "max_hold", None) is not None:
-            header.append("max_hold_dbfs")
-            columns.append(frame.max_hold)
-        if getattr(frame, "min_hold", None) is not None:
-            header.append("min_hold_dbfs")
-            columns.append(frame.min_hold)
-        if getattr(frame, "average", None) is not None:
-            header.append("average_dbfs")
-            columns.append(frame.average)
+        columns = [frequency, amplitude_dbfs]
+        raw_fields = (
+            ("max_hold_dbfs", "max_hold"),
+            ("min_hold_dbfs", "min_hold"),
+            ("average_dbfs", "average"),
+        )
+        for header_name, legacy_name in raw_fields:
+            values = getattr(frame, header_name, None)
+            if values is None:
+                values = getattr(frame, legacy_name, None)
+            if values is not None:
+                header.append(header_name)
+                columns.append(values)
+
+        calibrated_fields = (
+            ("amplitude_dbm", "amplitude_dbm"),
+            ("max_hold_dbm", "max_hold_dbm"),
+            ("min_hold_dbm", "min_hold_dbm"),
+            ("average_dbm", "average_dbm"),
+        )
+        for header_name, field_name in calibrated_fields:
+            values = getattr(frame, field_name, None)
+            if values is not None:
+                header.append(header_name)
+                columns.append(values)
         try:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)

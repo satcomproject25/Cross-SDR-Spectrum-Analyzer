@@ -35,6 +35,7 @@ from frontend.waterfall import WaterfallWidget
 from frontend.recorder import Recorder
 from frontend.freq_control import FrequencyControl
 from frontend.marker_dropdown import MarkerSelectorButton
+from frontend.amplitude import amplitude_unit, scalar_amplitude, trace_amplitude
 
 
 DEVICE_PROFILES = {
@@ -45,6 +46,9 @@ DEVICE_PROFILES = {
         "span_hz": 20e6,
         "summary": "20 MS/s · 20 MHz span",
         "detail": "Local IQ simulator · no SDR hardware required",
+        "min_frequency_hz": 1e6,
+        "max_frequency_hz": 6e9,
+        "max_gain_db": 62,
     },
     "HACKRF": {
         "sample_rates": ("2", "5", "8", "10", "12.5", "16", "20"),
@@ -53,6 +57,9 @@ DEVICE_PROFILES = {
         "span_hz": 20e6,
         "summary": "20 MS/s · 20 MHz span",
         "detail": "HackRF One supported ceiling · dedicated USB 2.0 bus recommended",
+        "min_frequency_hz": 1e6,
+        "max_frequency_hz": 6e9,
+        "max_gain_db": 62,
     },
     "USRP": {
         "sample_rates": ("10", "20", "25", "40", "50", "100", "200"),
@@ -61,6 +68,22 @@ DEVICE_PROFILES = {
         "span_hz": 160e6,
         "summary": "200 MS/s · 160 MHz span",
         "detail": "X300-series maximum · requires 160 MHz daughterboard and 10 GigE/PCIe",
+        "min_frequency_hz": 1e6,
+        "max_frequency_hz": 6e9,
+        "max_gain_db": 100,
+    },
+    "PLUTO": {
+        "sample_rates": (
+            "1", "2", "3", "4", "5", "6", "8", "10", "20", "30", "40", "50", "61.44"
+        ),
+        "sample_rate": "4",
+        "max_span_hz": 20e6,
+        "span_hz": 4e6,
+        "summary": "4 MS/s · 4 MHz span",
+        "detail": "ADALM-Pluto · USB or network through SoapyPlutoSDR/libiio",
+        "min_frequency_hz": 325e6,
+        "max_frequency_hz": 3.8e9,
+        "max_gain_db": 73,
     },
 }
 
@@ -131,6 +154,7 @@ class BackendBridge(QObject):
 class DeltaMarkerReadout(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._amplitude_unit = "dBm"
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(240, 160)
@@ -183,10 +207,13 @@ class DeltaMarkerReadout(QWidget):
             "",
             f"Ref:   {delta_info['frequency']/1e6:.4f} MHz",
             f"Delta: {delta_info['d_frequency']/1e6:.4f} MHz",
-            f"Ref:   {delta_info['amplitude']:.2f} dBFS",
-            f"Delta: {delta_info['d_amplitude']:.2f} dBFS",
+            f"Ref:   {delta_info['amplitude']:.2f} {self._amplitude_unit}",
+            f"Delta: {delta_info['d_amplitude']:.2f} {self._amplitude_unit}",
         ]
         self.content_label.setText("\n".join(lines))
+
+    def set_amplitude_unit(self, unit: str):
+        self._amplitude_unit = unit
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -444,6 +471,7 @@ class MainWindow(QMainWindow):
         self.sdr_type_combo.addItem("Simulator", "SIMULATOR")
         self.sdr_type_combo.addItem("HackRF One", "HACKRF")
         self.sdr_type_combo.addItem("Ettus USRP X301", "USRP")
+        self.sdr_type_combo.addItem("ADALM-Pluto", "PLUTO")
         device_layout.addWidget(device_label)
         device_layout.addWidget(self.sdr_type_combo)
         self._toolbar.addWidget(device_block)
@@ -497,7 +525,7 @@ class MainWindow(QMainWindow):
         self.reference_level_spin = QDoubleSpinBox()
         self.reference_level_spin.setRange(-150, 50)
         self.reference_level_spin.setValue(0)
-        self.reference_level_spin.setSuffix(" dBFS")
+        self.reference_level_spin.setSuffix(" dBm")
 
         lyt_rx.addRow("Reference:", self.reference_level_spin)
         lyt_rx.addRow("SR (Msps):", self.sample_rate_combo)
@@ -536,10 +564,10 @@ class MainWindow(QMainWindow):
         lyt_meas = QFormLayout(grp_meas)
         lyt_meas.setVerticalSpacing(12)
         self.lbl_meas_peak_freq = QLabel("-- MHz")
-        self.lbl_meas_peak_amp  = QLabel("-- dBFS")
-        self.lbl_meas_noise     = QLabel("-- dBFS")
+        self.lbl_meas_peak_amp  = QLabel("-- dBm")
+        self.lbl_meas_noise     = QLabel("-- dBm")
         self.lbl_meas_obw       = QLabel("-- kHz")
-        self.lbl_meas_chan_pwr  = QLabel("-- dBFS")
+        self.lbl_meas_chan_pwr  = QLabel("-- dBm")
         for label in (
             self.lbl_meas_peak_freq,
             self.lbl_meas_peak_amp,
@@ -741,7 +769,7 @@ class MainWindow(QMainWindow):
         self.lbl_fft_size = QLabel("FFT Size: 2048")
         self.lbl_rbw = QLabel("RBW: 9.7 kHz")
         self.lbl_fps = QLabel("FPS: --")
-        self.lbl_peak_status = QLabel("Peak: -- dBFS")
+        self.lbl_peak_status = QLabel("Peak: -- dBm")
 
         self.status_bar.addWidget(self.lbl_device_status)
         self.status_bar.addWidget(QLabel(" | "))
@@ -991,6 +1019,10 @@ class MainWindow(QMainWindow):
         self.span_ctrl.set_limits_hz(1e5, profile["max_span_hz"])
         self.span_ctrl.set_suffix_visible_unit("MHz")
         self.span_ctrl.set_value_hz(profile["span_hz"])
+        self.center_freq_ctrl.set_limits_hz(
+            profile["min_frequency_hz"], profile["max_frequency_hz"]
+        )
+        self.gain_spin.setMaximum(profile["max_gain_db"])
         self.lbl_profile_badge.setText(profile["summary"])
         self.lbl_profile_detail.setText(profile["detail"])
         self.lbl_profile_badge.setToolTip(profile["detail"])
@@ -1030,23 +1062,34 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, frame: SpectrumFrame):
         self._last_frame = frame
+        unit = amplitude_unit(frame)
+        self.delta_readout.set_amplitude_unit(unit)
+        self.reference_level_spin.setSuffix(f" {unit}")
         self.spectrum_widget.update_frame(frame)
         self.waterfall_widget.update_frame(frame)
 
-        peak = frame.peaks[0] if frame.peaks else None
+        peaks = getattr(frame, "peaks_dbm", None) if unit == "dBm" else None
+        if not peaks:
+            peaks = frame.peaks
+        peak = peaks[0] if peaks else None
         if peak is not None:
             peak_frequency = peak.frequency
             peak_amplitude = peak.amplitude
         else:
-            index = int(np.argmax(frame.amplitude))
+            amplitude = trace_amplitude(frame)
+            index = int(np.argmax(amplitude))
             peak_frequency = frame.frequency[index]
-            peak_amplitude = frame.amplitude[index]
-        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} dBFS")
+            peak_amplitude = amplitude[index]
+        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} {unit}")
         self.lbl_meas_peak_freq.setText(f"{peak_frequency/1e6:.6f} MHz")
-        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} dBFS")
-        self.lbl_meas_noise.setText(f"{frame.noise_floor:.2f} dBFS")
+        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} {unit}")
+        self.lbl_meas_noise.setText(
+            f"{scalar_amplitude(frame, 'noise_floor'):.2f} {unit}"
+        )
         self.lbl_meas_obw.setText(f"{frame.bandwidth/1e3:.3f} kHz")
-        self.lbl_meas_chan_pwr.setText(f"{frame.channel_power:.2f} dBFS")
+        self.lbl_meas_chan_pwr.setText(
+            f"{scalar_amplitude(frame, 'channel_power'):.2f} {unit}"
+        )
         self.lbl_fft_size.setText(f"FFT Size: {frame.fft_size}")
         self.lbl_rbw.setText(f"RBW: {frame.rbw/1e3:.3f} kHz")
         now = time.monotonic()  
@@ -1163,7 +1206,10 @@ class MainWindow(QMainWindow):
             self.table_markers.setRowCount(len(state))
             for row, (mid, entry) in enumerate(state.items()):
                 freq_str = f"{entry['frequency']/1e6:.4f} MHz"
-                amp_str = f"{entry['amplitude']:.2f} dBFS"
+                amp_str = (
+                    f"{entry['amplitude']:.2f} "
+                    f"{self.spectrum_widget._amplitude_unit}"
+                )
 
                 delta_str = "--"
                 if entry.get("delta"):
@@ -1190,6 +1236,10 @@ class MainWindow(QMainWindow):
         self.spectrum_widget.set_reference_level(
             self.reference_level_spin.value(),
             120
+        )
+        self.waterfall_widget.set_amplitude_range(
+            self.reference_level_spin.value() - 120,
+            self.reference_level_spin.value(),
         )
 
     def resizeEvent(self, event):

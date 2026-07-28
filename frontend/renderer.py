@@ -10,6 +10,8 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
+from .amplitude import amplitude_unit, trace_amplitude
+
 
 # ----------------------------------------------------------------------------
 # Theme constants
@@ -65,6 +67,7 @@ class SpectrumWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._amplitude_unit = "dBm"
         self._build_plot()
         self._init_traces()
         self._init_auto_peak_marker()
@@ -90,7 +93,7 @@ class SpectrumWidget(QWidget):
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setLabel("bottom", "Frequency", units="Hz",
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
-        pi.setLabel("left", "Amplitude", units="dBFS",
+        pi.setLabel("left", "Amplitude", units=self._amplitude_unit,
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
         for axis_name in ("bottom", "left"):
             axis = pi.getAxis(axis_name)
@@ -307,7 +310,9 @@ class SpectrumWidget(QWidget):
 
     def _place_marker(self, mid: int, freq: float, amp: float):
         color = MARKER_COLORS[mid]
-        label_text = f"M{mid}\n{freq/1e6:.3f} MHz\n{amp:.1f} dBFS"
+        label_text = (
+            f"M{mid}\n{freq/1e6:.3f} MHz\n{amp:.1f} {self._amplitude_unit}"
+        )
 
         if mid not in self._markers:
             target = pg.TargetItem(
@@ -354,7 +359,8 @@ class SpectrumWidget(QWidget):
         pos = target.pos()
         color = MARKER_COLORS[mid]
         target.setLabel(
-            f"M{mid}\n{pos.x()/1e6:.3f} MHz\n{pos.y():.1f} dBFS",
+            f"M{mid}\n{pos.x()/1e6:.3f} MHz\n"
+            f"{pos.y():.1f} {self._amplitude_unit}",
             {"color": color, "fill": (0, 0, 0, 180)}
         )
 
@@ -437,7 +443,8 @@ class SpectrumWidget(QWidget):
         delta_f = d_freq - p_pos.x()
         delta_a = d_amp  - p_pos.y()
         return (f"M{mid}{DELTA_SYMBOL}\n"
-                f"{d_freq/1e6:.3f} MHz  {d_amp:.1f} dBFS\n"
+                f"{d_freq/1e6:.3f} MHz  "
+                f"{d_amp:.1f} {self._amplitude_unit}\n"
                 f"{DELTA_SYMBOL}f: {delta_f/1e6:+.3f} MHz\n"
                 f"{DELTA_SYMBOL}A: {delta_a:+.1f} dB")
 
@@ -535,10 +542,19 @@ class SpectrumWidget(QWidget):
     def update_frame(self, frame):
         self._last_frame = frame
         freq = frame.frequency
-        amp  = frame.amplitude
+        unit = amplitude_unit(frame)
+        if unit != self._amplitude_unit:
+            self._amplitude_unit = unit
+            self.plot_widget.getPlotItem().setLabel(
+                "left",
+                "Amplitude",
+                units=unit,
+                **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"},
+            )
+        amp = trace_amplitude(frame, "amplitude")
         self._last_frequency = freq
         self._trace_amplitudes = {
-            name: getattr(frame, field)
+            name: trace_amplitude(frame, field)
             for name, field in MARKER_TRACE_FIELDS.items()
         }
         self._last_amplitude = self._trace_amplitudes[self._marker_trace]
@@ -565,12 +581,12 @@ class SpectrumWidget(QWidget):
 
         if self.show_clear_write:
             self.curve_clear_write.setData(freq, amp)
-        if self.show_max_hold and frame.max_hold is not None:
-            self.curve_max_hold.setData(freq, frame.max_hold)
-        if self.show_min_hold and frame.min_hold is not None:
-            self.curve_min_hold.setData(freq, frame.min_hold)
-        if self.show_average and frame.average is not None:
-            self.curve_average.setData(freq, frame.average)
+        if self.show_max_hold:
+            self.curve_max_hold.setData(freq, self._trace_amplitudes["max_hold"])
+        if self.show_min_hold:
+            self.curve_min_hold.setData(freq, self._trace_amplitudes["min_hold"])
+        if self.show_average:
+            self.curve_average.setData(freq, self._trace_amplitudes["average"])
         self._draw_carriers(frame)
         if self._markers:
             self._emit_state()

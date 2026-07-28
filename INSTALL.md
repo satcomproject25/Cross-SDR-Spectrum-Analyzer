@@ -1,7 +1,7 @@
 # Installation and hardware setup
 
-The analyzer uses SoapySDR as a common streaming layer for HackRF One and
-Ettus USRP. Start it from a **Radioconda Prompt** so the
+The analyzer uses SoapySDR as a common streaming layer for HackRF One,
+Ettus USRP, and ADALM-Pluto. Start it from a **Radioconda Prompt** so the
 SoapySDR DLLs and device modules are already on `PATH`.
 
 ## Required libraries
@@ -15,6 +15,7 @@ SoapySDR DLLs and device modules are already on `PATH`.
 | SoapySDR (including Python bindings) | Common device discovery and RX streaming API |
 | soapysdr-module-hackrf + hackrf | HackRF One driver and diagnostic tools |
 | soapysdr-module-uhd + uhd | Ettus USRP driver, utilities, firmware, and FPGA support |
+| soapysdr-module-plutosdr + libiio | ADALM-Pluto driver and USB/network IIO transport |
 
 The program itself does not require GNU Radio, SciPy, pandas, matplotlib,
 or vendor-specific Python APIs such as `uhd` or `pyadi-iio`.
@@ -25,7 +26,7 @@ Radioconda already includes the SDR packages above. Install the GUI packages
 and make sure all required packages are present:
 
 ```powershell
-mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph soapysdr soapysdr-module-hackrf soapysdr-module-uhd hackrf uhd
+mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph soapysdr soapysdr-module-hackrf soapysdr-module-uhd soapysdr-module-plutosdr hackrf uhd libiio
 ```
 
 Alternatively, create an isolated environment from the supplied file:
@@ -64,6 +65,14 @@ SoapySDR device modules and vendor libraries.
    Network USRPs must be on a reachable interface/subnet and allowed by the local
    firewall. UHD selects the correct transport from device discovery.
 
+3. ADALM-Pluto: install the Analog Devices USB driver/libiio support, then verify
+   the USB or network context and the Soapy module:
+
+   ```powershell
+   iio_info -s
+   SoapySDRUtil --find="driver=plutosdr"
+   ```
+
 Finally verify that both modules load:
 
 ```powershell
@@ -90,6 +99,9 @@ Select the device type, center frequency, span, sample rate, and gain, then pres
 device restart. The HackRF One profile is capped at 20 MS/s and 20 MHz. The
 Ettus USRP X301 profile uses the X300-series ceilings of 200 MS/s and 160 MHz;
 the widest mode requires a 160 MHz daughterboard and 10 GigE or PCIe.
+The ADALM-Pluto profile supports its standard 325 MHz–3.8 GHz tuning range,
+20 MHz instantaneous bandwidth, and sample rates up to 61.44 MS/s. It defaults
+to 4 MS/s for reliable USB streaming; higher rates are transport-dependent.
 Trace holds and averaging reset when the stream is started or reconfigured.
 
 ### Test without an SDR
@@ -115,13 +127,13 @@ display-ready spectrum arrays, so it is suitable for end-to-end GUI testing.
 ## RF safety and amplitude units
 
 Use attenuation between a signal generator and the SDR. Never assume a common
-safe input level across HackRF and USRP daughterboards; check the manual
+safe input level across HackRF, Pluto, and USRP daughterboards; check the manual
 for the exact hardware and start at a low generator level.
 
-Displayed amplitude is **dBFS**, because raw SDR samples are not factory-calibrated
-to connector power. Frequency, span, RBW, relative amplitude, max/min hold,
-averaging, markers, and delta markers remain valid. Absolute dBm accuracy would
-require a separate calibration for each device, gain, frequency, and signal path.
+Displayed amplitude is calibrated **dBm** only when `calibration.json` supplies a
+finite `power_offset_db` for the selected device/default or serial. The raw dBFS
+values remain in every frame and CSV for auditability. Without a valid offset,
+all amplitude features consistently fall back to visibly labeled dBFS.
 
 ## Offline acceptance check
 

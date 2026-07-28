@@ -73,6 +73,43 @@ class AnalyzerPipelineTests(unittest.TestCase):
         self.assertTrue(np.isfinite(frame.channel_power))
         self.assertGreaterEqual(frame.bandwidth, 0)
 
+    def test_power_calibration_covers_traces_peaks_and_measurements(self):
+        offset = 37.25
+        pipeline = AnalyzerPipeline(
+            self.config, "Calibrated SDR", power_offset_db=offset
+        )
+        frame = pipeline.process(self.tone(0.5))
+
+        self.assertEqual(frame.amplitude_unit, "dBm")
+        self.assertTrue(frame.power_calibrated)
+        self.assertTrue(np.allclose(frame.amplitude_dbm, frame.amplitude_dbfs + offset))
+        self.assertTrue(np.allclose(frame.max_hold_dbm, frame.max_hold_dbfs + offset))
+        self.assertTrue(np.allclose(frame.min_hold_dbm, frame.min_hold_dbfs + offset))
+        self.assertTrue(np.allclose(frame.average_dbm, frame.average_dbfs + offset))
+        self.assertAlmostEqual(
+            frame.peaks_dbm[0].amplitude,
+            frame.peaks[0].amplitude + offset,
+        )
+        self.assertAlmostEqual(
+            frame.noise_floor_dbm, frame.noise_floor_dbfs + offset
+        )
+        self.assertAlmostEqual(
+            frame.channel_power_dbm, frame.channel_power_dbfs + offset
+        )
+
+    def test_invalid_power_offsets_do_not_mislabel_dbfs_as_dbm(self):
+        for offset in (None, float("nan"), float("inf"), "not-a-number"):
+            with self.subTest(offset=offset):
+                pipeline = AnalyzerPipeline(
+                    self.config, "Uncalibrated SDR", power_offset_db=offset
+                )
+                frame = pipeline.process(self.tone(0.5))
+                self.assertFalse(frame.power_calibrated)
+                self.assertEqual(frame.amplitude_unit, "dBFS")
+                self.assertIsNone(frame.amplitude_dbm)
+                self.assertIsNone(frame.noise_floor_dbm)
+                self.assertIsNone(frame.channel_power_dbm)
+
 
 if __name__ == "__main__":
     unittest.main()

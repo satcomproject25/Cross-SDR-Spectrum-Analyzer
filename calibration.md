@@ -151,7 +151,7 @@ input_power_dbm = measured_tone_dbfs + power_offset_db
 power_offset_db = known_input_power_dbm - measured_tone_dbfs
 ```
 
-There is no universal HackRF or USRP offset. Receiver gain, frequency, filters,
+There is no universal HackRF, USRP, or Pluto offset. Receiver gain, frequency, filters,
 sample rate, selected connector, cable loss, attenuator error, and individual
 hardware all change it.
 
@@ -199,24 +199,25 @@ known modulated source or calibrated noise source. The current channel-power
 calculation sums the displayed FFT bins, so its calibration is valid only for
 the same span, sample rate, FFT size, and window.
 
-## 4. Code changes after power calibration
+## 4. How the application applies power calibration
 
-`backend/calibration.py` already loads `power_offset_db`, but the GUI deliberately
-continues to label values as dBFS while that value is `null`. After producing a
-valid calibration table, implement absolute-power display at these locations:
+The power display path is implemented as follows:
 
-1. In `backend/controller.py`, retain raw dBFS traces and add calibrated arrays
-   or calibrated measurement fields using `dbm = dbfs + power_offset_db`.
-2. In `backend/models.py`, explicitly name calibrated values with `_dbm`; do not
-   silently reuse fields whose meaning was dBFS.
-3. In `frontend/renderer.py`, change the axis label to dBm only when a valid
-   calibration is active.
-4. In `frontend/gui.py`, change peak/noise/channel-power/marker labels together;
-   never mix an amplitude shown in dBm with another value still in dBFS.
-5. In `frontend/recorder.py`, export separate `*_dbfs` and `*_dbm` columns so the
+1. `backend/controller.py` retains the raw dBFS traces and derives explicit
+   `*_dbm` traces and measurements using `dbm = dbfs + power_offset_db`.
+2. `backend/models.py` carries raw and calibrated values separately; legacy
+   amplitude fields retain their dBFS meaning.
+3. The spectrum, waterfall, reference level, peak/noise/channel-power readouts,
+   markers, delta-marker absolute levels, and status peak select the calibrated
+   dBm fields together.
+4. `frontend/recorder.py` exports separate `*_dbfs` and `*_dbm` columns so the
    raw measurement and calibration remain auditable.
-6. Add tests using a known calibration offset and tests confirming that an
-   uncalibrated device remains in dBFS.
+5. Invalid or missing offsets cause a consistent, visibly labeled dBFS fallback.
+6. Automated tests cover a known offset across traces, peaks, measurements, and
+   the mocked Pluto receive path.
+
+The built-in simulator has a nominal `0.0` offset so the calibrated display path
+can be tested without hardware. Its values are not physical connector power.
 
 Do not merely rename dBFS labels to dBm. Calibration metadata should include the
 SDR serial, timestamp, generator/attenuator identifiers, uncertainty, frequency,
@@ -227,7 +228,7 @@ sample rate, gain stages, bandwidth, and temperature.
 1. Restart the acquisition so the calibration file is reloaded.
 2. Test at frequencies and powers used to create the calibration.
 3. Test additional points between them and at the intended operating extremes.
-4. Verify HackRF and USRP separately; never reuse one device's values for another.
+4. Verify HackRF, USRP, and Pluto separately; never reuse one device's values for another.
 5. Save the raw CSV, generator settings, cable/attenuator data, and software
    commit alongside the calibration record.
 6. Recalibrate after hardware repair, firmware/driver changes, RF-path changes,

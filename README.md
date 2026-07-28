@@ -4,6 +4,7 @@ A desktop spectrum analyzer for receiving and displaying live RF signals with:
 
 - HackRF One
 - Ettus USRP devices supported by UHD
+- Analog Devices ADALM-Pluto through SoapyPlutoSDR/libiio
 - A built-in IQ simulator for testing without hardware
 
 The application continuously receives complex IQ samples from the selected
@@ -15,8 +16,9 @@ bin. Six normal/delta markers can be attached to CW, Max hold, Min hold, or
 Average, with one trace selected for all markers at a time. Marker selection
 defaults to **None** so spectrum clicks cannot create markers accidentally.
 
-> **Current amplitude unit:** dBFS. Absolute dBm requires RF calibration for the
-> specific SDR, frequency, gain, sample rate, and signal path. See
+> **Amplitude units:** when `power_offset_db` is configured for the selected
+> device/serial, every trace, marker, waterfall, and measurement is displayed in
+> calibrated dBm. An uncalibrated device remains visibly labeled dBFS. See
 > [Amplitude: dBFS and dBm](#amplitude-dbfs-and-dbm).
 
 ## Contents
@@ -41,10 +43,10 @@ Simulator mode generates IQ samples; it does not generate a ready-made graph.
 
 ```mermaid
 flowchart LR
-    A["HackRF / USRP / Simulator"] --> B["Complex IQ samples"]
+    A["HackRF / USRP / Pluto / Simulator"] --> B["Complex IQ samples"]
     B --> C["4096-point Hann-windowed FFT"]
-    C --> D["Frequency bins and dBFS levels"]
-    D --> E["Live, max hold, min hold, average"]
+    C --> D["Raw dBFS frequency bins"]
+    D --> E["Raw traces plus calibrated dBm traces"]
     E --> F["Peaks and measurements"]
     F --> G["SpectrumFrame"]
     G --> H["Spectrum, waterfall, markers and readouts"]
@@ -62,7 +64,9 @@ In simple terms:
 5. `backend/measurements.py` and `backend/peak.py` calculate the measurement
    values. The renderer places the red auto-peak indicator on the strongest live
    FFT bin.
-6. `backend/controller.py` packages everything into one `SpectrumFrame`.
+6. `backend/controller.py` retains the raw dBFS values, applies the selected
+   device/serial calibration, and packages explicit dBFS and dBm fields into one
+   `SpectrumFrame`.
 7. Qt sends that frame to the spectrum renderer and waterfall in the frontend.
 
 The default FFT size is 4096. The approximate resolution bandwidth is:
@@ -116,11 +120,12 @@ Then:
 | SoapySDR with Python bindings | Common streaming and discovery interface |
 | `soapysdr-module-hackrf` and `hackrf` | HackRF One |
 | `soapysdr-module-uhd` and `uhd` | Ettus USRP |
+| `soapysdr-module-plutosdr` and `libiio` | ADALM-Pluto |
 
 The recommended environment is Radioconda. From a Radioconda Prompt:
 
 ```powershell
-mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph soapysdr soapysdr-module-hackrf soapysdr-module-uhd hackrf uhd
+mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph soapysdr soapysdr-module-hackrf soapysdr-module-uhd soapysdr-module-plutosdr hackrf uhd libiio
 ```
 
 Alternatively, create the supplied environment:
@@ -194,6 +199,22 @@ analyzer discovers and opens the USRP only when acquisition starts and uses RX
 channel 0. Switching back to **HackRF One** restores its 20 MS/s and 20 MHz
 limits before the next stream opens.
 
+### ADALM-Pluto
+
+Verify USB or network discovery before opening the application:
+
+```powershell
+iio_info -s
+SoapySDRUtil --find="driver=plutosdr"
+```
+
+Select **ADALM-Pluto** to use its dedicated receive path. The standard profile
+limits tuning to 325 MHz–3.8 GHz, instantaneous span to 20 MHz, and sampling to
+61.44 MS/s. Device selection supports both USB and network libiio URIs. Modified
+out-of-spec Pluto firmware ranges are intentionally not assumed. The default is
+4 MS/s and a 4 MHz span for reliable USB operation; higher exposed rates depend
+on the host transport and may overflow.
+
 ## Using the interface
 
 The header is reserved for device selection and acquisition state. Tuning and
@@ -210,7 +231,7 @@ cyan interaction accents so controls and plot annotations remain visible.
 
 | Control | Meaning |
 |---|---|
-| Device | Select Simulator, HackRF One, or the Ettus USRP X301 profile |
+| Device | Select Simulator, HackRF One, Ettus USRP X301, or ADALM-Pluto |
 | Start / Stop acquisition | Open or close the continuous receive stream |
 | Center | RF center frequency in Hz, kHz, MHz, or GHz |
 | Span | Width of spectrum displayed around the center |
@@ -223,7 +244,9 @@ setting while running performs a controlled stream restart.
 
 Device selection updates both the sample-rate choices and the span limit. The
 HackRF profile restores 20 MS/s and 20 MHz. The X301 profile exposes 200 MS/s
-and 160 MHz subject to its daughterboard and host-link requirements. A device
+and 160 MHz subject to its daughterboard and host-link requirements. The Pluto
+profile exposes sample rates through 61.44 MS/s with a 20 MHz maximum span and
+applies its standard tuning range. A device
 can still reject a setting unsupported by its exact hardware configuration; the
 status bar displays that error rather than silently continuing.
 
@@ -234,14 +257,14 @@ status bar displays that error rather than silently continuing.
 | Clear Write | Cyan | Most recent FFT frame |
 | Max Hold | Violet | Highest value reached by every frequency bin |
 | Min Hold | Blue | Lowest valid displayed-sweep value reached by every frequency bin since Min Hold was enabled |
-| Average | Yellow | Running linear-power average of every frequency bin, displayed in dBFS |
+| Average | Yellow | Running linear-power average of every frequency bin, displayed in the active calibrated unit |
 
 Max-hold and average history start with acquisition. Min hold starts fresh when
 it is enabled. Trace history resets after the stream is reconfigured or
 restarted. Numerical FFT-floor values are excluded from min hold so a single
 underflow bin cannot pin the trace to -140 dBFS. Multiple traces can be displayed
 at the same time. Average uses the same power-detector path for Simulator,
-HackRF, and USRP input, so noise-like digital modulation remains visible instead
+HackRF, USRP, and Pluto input, so noise-like digital modulation remains visible instead
 of being suppressed by direct arithmetic averaging of dB values. Hardware modes
 show only carriers physically present at their RF inputs; no simulator signal is
 mixed into live SDR samples.
@@ -269,13 +292,14 @@ mixed into live SDR samples.
 ### Waterfall
 
 The waterfall stores recent spectrum frames as rows. Frequency runs horizontally
-and older frames move through the time axis. Color represents the dBFS level.
+and older frames move through the time axis. Color represents calibrated dBm
+when available, with the same explicit dBFS fallback as the spectrum.
 
 ### Screenshot and CSV
 
 - **Screenshot** saves an image of the application.
-- **Export CSV** saves frequency, live amplitude, max hold, min hold, and average
-  columns when those arrays are available.
+- **Export CSV** saves auditable raw `*_dbfs` columns and adds calibrated
+  `*_dbm` columns when a power calibration is active.
 - Exports default to `SpectrumAnalyzer_Exports` in the current user's home
   directory, but the file dialog allows another location.
 
@@ -305,10 +329,10 @@ The right-side measurement panel currently reports:
 | Measurement | Current calculation |
 |---|---|
 | Peak Frequency | Frequency of the strongest live FFT bin |
-| Peak Amplitude | Amplitude of that bin in dBFS |
+| Peak Amplitude | Calibrated amplitude of that bin in dBm |
 | Noise Floor | Median amplitude of all displayed FFT bins |
 | Occupied Bandwidth | Frequency interval containing the middle 99% of displayed spectral power: 0.5% to 99.5% cumulative power |
-| Channel Power | Sum of linear power from every displayed FFT bin, converted back to dBFS |
+| Channel Power | Sum of linear power from every displayed FFT bin, converted to calibrated dBm |
 
 Important interpretation notes:
 
@@ -347,14 +371,18 @@ input power (dBm) = measured level (dBFS) + calibration offset (dB)
 ```
 
 The offset must be measured using a known signal generator at the SDR input and
-stored for the relevant frequency, gain, sample rate, and RF path. A single
-fixed offset would only be an estimate and would not provide Keysight-class
-accuracy. Simulator values cannot represent physical dBm because the simulator
-has no RF connector.
+stored for the relevant frequency, gain, sample rate, and RF path. The analyzer
+loads the device default and then any matching serial override. It preserves raw
+dBFS arrays and derives separate `*_dbm` traces, peaks, noise floor, and channel
+power. The spectrum, waterfall, reference control, marker labels/table,
+delta-marker absolute readouts, measurement panel, status peak, and calibrated
+CSV columns all use those dBm fields together.
 
-Until calibration tables are added, changing the label from dBFS to dBm would
-produce incorrect absolute readings. Frequency, bandwidth, relative level,
-trace holds, averaging, and marker-delta measurements remain useful in dBFS.
+If `power_offset_db` is absent, `null`, non-numeric, or non-finite, the frame is
+marked uncalibrated and all displays remain consistently labeled dBFS. This
+prevents a unit rename from being mistaken for an absolute RF calibration.
+The simulator's `0.0` offset is a nominal software scale for exercising the
+complete dBm UI path; it does not represent power at a physical RF connector.
 
 ## Project structure
 
@@ -407,12 +435,12 @@ python -m unittest discover -s tests -v
 
 The tests verify:
 
-- tone frequency and dBFS level
+- tone frequency, raw dBFS level, and calibrated dBm conversion
 - max hold, min hold, and average accumulation
 - display-span cropping and finite measurements
 - mocked SoapySDR stream delivery and shutdown
-- isolated HackRF/USRP selection and mocked USRP receive configuration
-- X300-series/HackRF profile limits and marker-disabled UI state
+- isolated HackRF/USRP/Pluto selection and mocked hardware configuration
+- X300-series/HackRF/Pluto profile limits and marker-disabled UI state
 - real-time simulator delivery through the normal analyzer pipeline
 
 Run a syntax check with:
@@ -429,7 +457,7 @@ actual SDR and a safely attenuated known signal source.
 
 ### The GUI opens but shows the simulator
 
-Simulator is the default device. Select **HackRF** or **USRP**, then
+Simulator is the default device. Select **HackRF**, **USRP**, or **ADALM-Pluto**, then
 press **Run**.
 
 ### SoapySDR cannot be imported
@@ -461,6 +489,15 @@ SoapySDRUtil --find="driver=uhd"
 ```
 
 Check UHD images, USB drivers, or the network interface/subnet as appropriate.
+
+### No PlutoSDR is detected
+
+```powershell
+iio_info -s
+SoapySDRUtil --find="driver=plutosdr"
+```
+
+Confirm the Pluto USB/network connection, libiio, and the SoapyPlutoSDR module.
 
 ### A large spike appears at the center
 
@@ -494,11 +531,13 @@ connected to the RF/antenna input—not a clock, trigger, or output connector.
 
 - Receive-only spectrum analysis; the application does not transmit.
 - One SDR and receive channel 0 at a time.
-- Maximum GUI sample-rate selection is currently 20 Msps.
+- Device profiles currently expose up to 20 MS/s for HackRF, 61.44 MS/s for
+  Pluto, and 200 MS/s for the X300-series USRP profile.
 - FFT size is fixed at 4096.
 - Span is limited to the selected sample rate; wide sweeps across multiple LO
   tunings are not implemented.
-- Amplitude is dBFS until device-specific RF calibration is implemented.
+- Absolute dBm requires a valid `power_offset_db` for the exact device and RF
+  configuration; otherwise the application explicitly falls back to dBFS.
 - Channel power integrates the full displayed span.
 - This is an SDR-based analyzer, not a replacement for a calibrated laboratory
   spectrum analyzer or power meter.

@@ -8,20 +8,23 @@ from .sdr import SDR
 
 def main():
     parser = argparse.ArgumentParser(description="List SDRs visible to the analyzer")
-    parser.add_argument("device", choices=("HACKRF", "USRP"), nargs="?")
+    parser.add_argument("device", choices=("HACKRF", "USRP", "PLUTO"), nargs="?")
     parser.add_argument(
         "--configure",
         action="store_true",
         help="Configure any detected SDR for receiving",
     )
     args = parser.parse_args()
-    device_types = (args.device,) if args.device else ("HACKRF", "USRP")
+    device_types = (args.device,) if args.device else ("HACKRF", "USRP", "PLUTO")
     found = 0
     try:
         for device_type in device_types:
             devices = enumerate_devices(device_type)
             if args.configure:
-                info = SDR().configure_receive(device_type)
+                center_frequency = 2.44e9 if device_type == "PLUTO" else 100e6
+                info = SDR().configure_receive(
+                    device_type, center_frequency=center_frequency
+                )
                 print(f"{device_type}: configured for receive")
                 print(f"  {info.device_name}")
                 for key, value in info.details.items():
