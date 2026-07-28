@@ -191,6 +191,12 @@ class SpectrumWidgetTests(unittest.TestCase):
             )
         )
 
+        self.widget.set_active_marker(1)
+        self.widget.place_active_marker_at_frequency(200.0)
+        self.widget.add_delta_marker(1)
+        self.assertIn("dBm", self.widget._markers[1].label().toPlainText())
+        self.assertIn("dBm", self.widget._delta_markers[1].label().toPlainText())
+
 
 if __name__ == "__main__":
     unittest.main()

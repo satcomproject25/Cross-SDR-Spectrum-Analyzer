@@ -13,9 +13,9 @@ from collections.abc import Callable
 import numpy as np
 
 from .controller import AnalyzerPipeline
-# from .calibration import load_device_calibration, interpolated_offset_hz // NON-LINEAR SCALE.
 from .calibration import load_device_calibration
 from .models import AcquisitionConfig, DeviceInfo
+from .power_calibration import resolve_power_offset_db
 
 
 HACKRF_DRIVER = "hackrf"
@@ -95,7 +95,11 @@ def _pipeline_for_device(
         calibration = load_device_calibration(
             config.device_type, info.serial_number
         )
-    offset = calibrated_power_offset(calibration)
+    offset = resolve_power_offset_db(
+        calibration,
+        vga_db=config.gain,
+        freq_hz=config.center_frequency,
+    )
     info.details["power_calibrated"] = str(offset is not None)
     info.details["power_offset_db"] = "" if offset is None else str(offset)
     return AnalyzerPipeline(config, info.device_name, power_offset_db=offset)
@@ -387,10 +391,22 @@ class HackRFAcquisition:
             # Two-term display-axis correction: constant offset + proportional (ppm)
             # drift. Sign convention (calibration doc): offset_hz = observed - reference,
             # and a POSITIVE error means the project displays too high, so we SUBTRACT.
+            has_two_term_calibration = (
+                "frequency_fixed_error_hz" in calibration
+                or "frequency_ppm_error" in calibration
+            )
             fixed_error_hz = float(calibration.get("frequency_fixed_error_hz") or 0.0)
             ppm_error = float(calibration.get("frequency_ppm_error") or 0.0)
-            frequency_error_hz = fixed_error_hz + driver_freq * ppm_error * 1e-6
-            calibrated_freq = driver_freq - frequency_error_hz
+            if has_two_term_calibration:
+                frequency_error_hz = fixed_error_hz + driver_freq * ppm_error * 1e-6
+                calibrated_freq = driver_freq - frequency_error_hz
+            else:
+                # Compatibility with the original single display-axis correction.
+                legacy_offset_hz = float(
+                    calibration.get("frequency_axis_offset_hz") or 0.0
+                )
+                frequency_error_hz = -legacy_offset_hz
+                calibrated_freq = driver_freq + legacy_offset_hz
 
             # Power calibration: resolve the dBFS->dBm offset for the live VGA and
             # centre frequency. Guarded so a calibration taken at a different gain
@@ -480,7 +496,11 @@ class HackRFAcquisition:
             soapy, info = self._open()
             if status_callback:
                 status_callback(f"Connected: {info.device_name}")
-            pipeline = AnalyzerPipeline(self.config, info.device_name)
+            pipeline = AnalyzerPipeline(
+                self.config,
+                info.device_name,
+                power_offset_db=self._power_offset_db,
+            )
 
             block = np.empty(self.config.fft_size, dtype=np.complex64)
             filled = 0

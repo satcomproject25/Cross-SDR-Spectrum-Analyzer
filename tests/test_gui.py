@@ -215,6 +215,19 @@ class MainWindowProfileTests(unittest.TestCase):
         self.assertEqual(self.window.lbl_meas_chan_pwr.text(), "22.00 dBm")
         self.assertEqual(self.window.spectrum_widget._amplitude_unit, "dBm")
         self.assertEqual(self.window.delta_readout._amplitude_unit, "dBm")
+        self.assertEqual(self.window.reference_level_spin.suffix(), " dBm")
+        self.assertTrue(np.array_equal(self.window.waterfall_widget._buffer[0], calibrated))
+
+        self.window._update_marker_table(
+            {
+                1: {
+                    "frequency": float(frequency[-1]),
+                    "amplitude": float(calibrated[-1]),
+                    "delta": None,
+                }
+            }
+        )
+        self.assertEqual(self.window.table_markers.item(0, 2).text(), "12.00 dBm")
 
 
 if __name__ == "__main__":

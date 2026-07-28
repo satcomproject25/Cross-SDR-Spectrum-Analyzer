@@ -29,45 +29,38 @@ Power correction (see power_calibration.py):
 from __future__ import annotations
 
 import json
-import math
 import os
 from pathlib import Path
+from typing import Any
 
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "calibration.json"
 
 
-def load_device_calibration(device_type: str, serial: str = "") -> dict[str, float | None]:
+def load_device_calibration(device_type: str, serial: str = "") -> dict[str, Any]:
     """Return wildcard calibration merged with a serial-specific override."""
     path = Path(os.environ.get("FREQANALYZER_CALIBRATION", DEFAULT_PATH))
-    result: dict[str, float | None] = {
+    result: dict[str, Any] = {
         "frequency_axis_offset_hz": 0.0,
         "power_offset_db": None,
     }
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         device = document.get("devices", {}).get(device_type.upper(), {})
-        result.update(device.get("default", {}))
-        if serial:
-            result.update(device.get("serials", {}).get(serial, {}))
+        if not isinstance(device, dict):
+            return result
+
+        default_calibration = device.get("default", {})
+        if isinstance(default_calibration, dict):
+            result.update(default_calibration)
+
+        serials = device.get("serials", {})
+        if serial and isinstance(serials, dict):
+            serial_calibration = serials.get(str(serial), {})
+            if isinstance(serial_calibration, dict):
+                result.update(serial_calibration)
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, AttributeError):
         return result
-
-    # (2) device-level default
-    default_cal = device_block.get("default", {})
-    if isinstance(default_cal, dict):
-        for key in _RESULT_DEFAULTS:
-            if key in default_cal:
-                result[key] = default_cal[key]
-
-    # (3) serial-specific override (only when the serial actually matches)
-    serials = device_block.get("serials", {})
-    if serial and isinstance(serials, dict):
-        serial_cal = serials.get(str(serial))
-        if isinstance(serial_cal, dict):
-            for key in _RESULT_DEFAULTS:
-                if key in serial_cal:
-                    result[key] = serial_cal[key]
 
     return result
 

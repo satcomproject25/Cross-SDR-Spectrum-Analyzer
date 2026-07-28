@@ -1063,13 +1063,11 @@ class MainWindow(QMainWindow):
     def _on_frame_ready(self, frame: SpectrumFrame):
         self._last_frame = frame
         unit = amplitude_unit(frame)
+        self._current_unit = unit
         self.delta_readout.set_amplitude_unit(unit)
         self.reference_level_spin.setSuffix(f" {unit}")
         self.spectrum_widget.update_frame(frame)
         self.waterfall_widget.update_frame(frame)
-
-        unit = getattr(frame, "unit", "dBFS")
-        self._current_unit = unit
 
         peaks = getattr(frame, "peaks_dbm", None) if unit == "dBm" else None
         if not peaks:
@@ -1082,13 +1080,15 @@ class MainWindow(QMainWindow):
             amplitude = trace_amplitude(frame)
             index = int(np.argmax(amplitude))
             peak_frequency = frame.frequency[index]
-            peak_amplitude = frame.amplitude[index]
-        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} dBFS")
+            peak_amplitude = amplitude[index]
+        noise_floor = scalar_amplitude(frame, "noise_floor")
+        channel_power = scalar_amplitude(frame, "channel_power")
+        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} {unit}")
         self.lbl_meas_peak_freq.setText(f"{peak_frequency/1e6:.6f} MHz")
-        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} dBFS")
-        self.lbl_meas_noise.setText(f"{frame.noise_floor:.2f} dBFS")
+        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} {unit}")
+        self.lbl_meas_noise.setText(f"{noise_floor:.2f} {unit}")
         self.lbl_meas_obw.setText(f"{frame.bandwidth/1e3:.3f} kHz")
-        self.lbl_meas_chan_pwr.setText(f"{frame.channel_power:.2f} dBFS")
+        self.lbl_meas_chan_pwr.setText(f"{channel_power:.2f} {unit}")
         self.lbl_fft_size.setText(f"FFT Size: {frame.fft_size}")
         self.lbl_rbw.setText(f"RBW: {frame.rbw/1e3:.3f} kHz")
         now = time.monotonic()  
@@ -1205,7 +1205,7 @@ class MainWindow(QMainWindow):
             self.table_markers.setRowCount(len(state))
             for row, (mid, entry) in enumerate(state.items()):
                 freq_str = f"{entry['frequency']/1e6:.4f} MHz"
-                amp_str = f"{entry['amplitude']:.2f} dBFS"
+                amp_str = f"{entry['amplitude']:.2f} {self._current_unit}"
 
                 delta_str = "--"
                 if entry.get("delta"):
