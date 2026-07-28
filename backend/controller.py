@@ -9,15 +9,11 @@ from .models import IQFrame, SpectrumFrame
 from .peak import PeakEngine
 from .carrier_detection import CarrierDetectionEngine
 from .trace import TraceEngine
+from .power_calibration import dbfs_to_dbm
 
 
 class AnalyzerPipeline:
-    def __init__(
-        self,
-        config,
-        device_name: str = "",
-        power_offset_db: float | None = None,
-    ):
+    def __init__(self, config, device_name: str = ""):
         self.config = config
         self.device_name = device_name
         try:
@@ -33,6 +29,9 @@ class AnalyzerPipeline:
         self.peaks = PeakEngine()
         self.carrier_detector = CarrierDetectionEngine()
         self.frame_count = 0
+        # dBFS -> dBm offset resolved once at bring-up (acquisition.py).
+        # None => uncalibrated, values pass through unchanged and stay dBFS.
+        self._power_offset_db = power_offset_db
 
     def process(self, samples) -> SpectrumFrame:
         iq_frame = IQFrame(
@@ -42,36 +41,25 @@ class AnalyzerPipeline:
             center_frequency=self.config.center_frequency,
         )
         spectrum = self.dsp.process(iq_frame, self.config.span)
+
+        # Convert the raw dBFS spectrum to dBm here, in one place, BEFORE any
+        # trace/measurement consumes it. SpectrumData.amplitude is the dBFS
+        # magnitude array (see dsp.py); a constant offset is safe to apply
+        # before trace accumulation, and doing it here keeps live/hold/average
+        # traces, peaks and measurements all in the same calibrated unit.
+        # No-op when uncalibrated (offset is None).
+        spectrum.amplitude = dbfs_to_dbm(spectrum.amplitude, self._power_offset_db)
+        if self.frame_count == 0:
+            print(f"[CAL] offset={self._power_offset_db}")
+            print(f"[CAL] spectrum.amplitude max = {spectrum.amplitude.max():.2f}")
+        traces = self.traces.update(spectrum)
+        if self.frame_count == 0:
+            print(f"[CAL] traces.live max = {traces.live.max():.2f}")
+
         traces = self.traces.update(spectrum)
         carriers = self.carrier_detector.detect(traces.live)
         measurements = self.measurements.update(traces)
         peaks = self.peaks.find(traces)
-        calibrated = self.power_offset_db is not None
-        if calibrated:
-            offset = self.power_offset_db
-            amplitude_dbm = traces.live + offset
-            max_hold_dbm = traces.max_hold + offset
-            min_hold_dbm = traces.min_hold + offset
-            average_dbm = traces.average + offset
-            peaks_dbm = [
-                type(peak)(
-                    id=peak.id,
-                    frequency=peak.frequency,
-                    amplitude=peak.amplitude + offset,
-                    bin_index=peak.bin_index,
-                )
-                for peak in peaks
-            ]
-            noise_floor_dbm = measurements.noise_floor + offset
-            channel_power_dbm = measurements.channel_power + offset
-        else:
-            amplitude_dbm = None
-            max_hold_dbm = None
-            min_hold_dbm = None
-            average_dbm = None
-            peaks_dbm = []
-            noise_floor_dbm = None
-            channel_power_dbm = None
         self.frame_count += 1
         return SpectrumFrame(
             frequency=traces.frequency,
@@ -91,6 +79,7 @@ class AnalyzerPipeline:
             rbw=spectrum.rbw,
             frame_count=traces.frame_count,
             device_name=self.device_name,
+            unit=("dBm" if self._power_offset_db is not None else "dBFS"),
             carriers=carriers,
             amplitude_dbfs=traces.live,
             max_hold_dbfs=traces.max_hold,

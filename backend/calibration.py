@@ -1,4 +1,30 @@
-"""Load optional, device-specific measurement calibration values."""
+"""Device frequency/power calibration loading.
+
+Schema (per device serial, falling back to the device 'default'):
+    frequency_fixed_error_hz : float   constant offset, Hz
+    frequency_ppm_error      : float   proportional error, parts per million
+    power_offset_db          : float | None
+    power_base_offset_db     : float | None            single-constant power cal
+    power_base_offset_table  : list | None             per-frequency power cal
+    power_vga_table          : list | None             per-VGA power cal
+    power_cal_lna_db         : float | None            LNA the cal was taken at
+    power_cal_amp_db         : float | None            AMP the cal was taken at
+    power_cal_attenuator_db  : float | None            input pad (already stripped)
+    power_cal_vga_min_db     : float | None            calibrated VGA range floor
+    power_cal_vga_max_db     : float | None            calibrated VGA range ceiling
+
+Frequency correction applied downstream (see acquisition.py):
+    frequency_error_hz = fixed + driver_freq * ppm * 1e-6
+    calibrated_freq    = driver_freq - frequency_error_hz
+
+Sign convention (from the calibration procedure doc):
+    offset_hz = observed_frequency_hz - reference_frequency_hz
+    A POSITIVE error means the project displays too HIGH, so we SUBTRACT.
+
+Power correction (see power_calibration.py):
+    dbm = dbfs + power_offset_db,  where power_offset_db is resolved from the
+    table(s) above for the live VGA and centre frequency.
+"""
 
 from __future__ import annotations
 
@@ -6,16 +32,15 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any
 
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "calibration.json"
 
 
-def load_device_calibration(device_type: str, serial: str = "") -> dict[str, Any]:
+def load_device_calibration(device_type: str, serial: str = "") -> dict[str, float | None]:
     """Return wildcard calibration merged with a serial-specific override."""
     path = Path(os.environ.get("FREQANALYZER_CALIBRATION", DEFAULT_PATH))
-    result: dict[str, Any] = {
+    result: dict[str, float | None] = {
         "frequency_axis_offset_hz": 0.0,
         "power_offset_db": None,
     }
@@ -27,19 +52,24 @@ def load_device_calibration(device_type: str, serial: str = "") -> dict[str, Any
             result.update(device.get("serials", {}).get(serial, {}))
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, AttributeError):
         return result
+
+    # (2) device-level default
+    default_cal = device_block.get("default", {})
+    if isinstance(default_cal, dict):
+        for key in _RESULT_DEFAULTS:
+            if key in default_cal:
+                result[key] = default_cal[key]
+
+    # (3) serial-specific override (only when the serial actually matches)
+    serials = device_block.get("serials", {})
+    if serial and isinstance(serials, dict):
+        serial_cal = serials.get(str(serial))
+        if isinstance(serial_cal, dict):
+            for key in _RESULT_DEFAULTS:
+                if key in serial_cal:
+                    result[key] = serial_cal[key]
+
     return result
-
-
-def calibrated_power_offset(calibration: dict[str, Any]) -> float | None:
-    """Return a finite dBFS-to-dBm offset, or ``None`` when uncalibrated."""
-    value = calibration.get("power_offset_db")
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        offset = float(value)
-    except (TypeError, ValueError):
-        return None
-    return offset if math.isfinite(offset) else None
 
 # IF OFFSET DOES NOT SCALE LINEARLY, USE THIS
 # REMOVE IF IT SCALES LINEARLY

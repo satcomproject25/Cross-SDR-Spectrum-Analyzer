@@ -33,7 +33,7 @@ class CarrierDetectionEngine:
         enter_threshold_db: float = 10.0,
         exit_threshold_db: float = 3.0,
         smoothing_window: int | None = None,
-        minimum_width_bins: int = 3,
+        minimum_width_bins: int = 50,
         merge_gap_bins: int = 0,
     ):
         if enter_threshold_db <= exit_threshold_db:

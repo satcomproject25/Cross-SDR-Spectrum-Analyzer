@@ -240,7 +240,7 @@ class MainWindow(QMainWindow):
         self._last_frame = None
         self._last_frame_time = None
         self._min_hold_was_enabled = False
-
+        self._current_unit = "dBFS"
         # Base Layout Initialization
         self.setDockOptions(QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AnimatedDocks)
         
@@ -1068,6 +1068,9 @@ class MainWindow(QMainWindow):
         self.spectrum_widget.update_frame(frame)
         self.waterfall_widget.update_frame(frame)
 
+        unit = getattr(frame, "unit", "dBFS")
+        self._current_unit = unit
+
         peaks = getattr(frame, "peaks_dbm", None) if unit == "dBm" else None
         if not peaks:
             peaks = frame.peaks
@@ -1079,17 +1082,13 @@ class MainWindow(QMainWindow):
             amplitude = trace_amplitude(frame)
             index = int(np.argmax(amplitude))
             peak_frequency = frame.frequency[index]
-            peak_amplitude = amplitude[index]
-        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} {unit}")
+            peak_amplitude = frame.amplitude[index]
+        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} dBFS")
         self.lbl_meas_peak_freq.setText(f"{peak_frequency/1e6:.6f} MHz")
-        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} {unit}")
-        self.lbl_meas_noise.setText(
-            f"{scalar_amplitude(frame, 'noise_floor'):.2f} {unit}"
-        )
+        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} dBFS")
+        self.lbl_meas_noise.setText(f"{frame.noise_floor:.2f} dBFS")
         self.lbl_meas_obw.setText(f"{frame.bandwidth/1e3:.3f} kHz")
-        self.lbl_meas_chan_pwr.setText(
-            f"{scalar_amplitude(frame, 'channel_power'):.2f} {unit}"
-        )
+        self.lbl_meas_chan_pwr.setText(f"{frame.channel_power:.2f} dBFS")
         self.lbl_fft_size.setText(f"FFT Size: {frame.fft_size}")
         self.lbl_rbw.setText(f"RBW: {frame.rbw/1e3:.3f} kHz")
         now = time.monotonic()  
@@ -1206,10 +1205,7 @@ class MainWindow(QMainWindow):
             self.table_markers.setRowCount(len(state))
             for row, (mid, entry) in enumerate(state.items()):
                 freq_str = f"{entry['frequency']/1e6:.4f} MHz"
-                amp_str = (
-                    f"{entry['amplitude']:.2f} "
-                    f"{self.spectrum_widget._amplitude_unit}"
-                )
+                amp_str = f"{entry['amplitude']:.2f} dBFS"
 
                 delta_str = "--"
                 if entry.get("delta"):

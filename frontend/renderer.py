@@ -95,6 +95,7 @@ class SpectrumWidget(QWidget):
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
         pi.setLabel("left", "Amplitude", units=self._amplitude_unit,
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
+        self._axis_unit = "dBFS"
         for axis_name in ("bottom", "left"):
             axis = pi.getAxis(axis_name)
             axis.setTextPen(COLOR_AXIS_TEXT)
@@ -310,9 +311,7 @@ class SpectrumWidget(QWidget):
 
     def _place_marker(self, mid: int, freq: float, amp: float):
         color = MARKER_COLORS[mid]
-        label_text = (
-            f"M{mid}\n{freq/1e6:.3f} MHz\n{amp:.1f} {self._amplitude_unit}"
-        )
+        label_text = f"M{mid}\n{freq/1e6:.3f} MHz\n{amp:.1f} dBFS"
 
         if mid not in self._markers:
             target = pg.TargetItem(
@@ -358,9 +357,9 @@ class SpectrumWidget(QWidget):
             return
         pos = target.pos()
         color = MARKER_COLORS[mid]
+        unit = getattr(self, "_current_unit", "dBFS")
         target.setLabel(
-            f"M{mid}\n{pos.x()/1e6:.3f} MHz\n"
-            f"{pos.y():.1f} {self._amplitude_unit}",
+            f"M{mid}\n{pos.x()/1e6:.3f} MHz\n{pos.y():.1f} dBFS",
             {"color": color, "fill": (0, 0, 0, 180)}
         )
 
@@ -442,9 +441,9 @@ class SpectrumWidget(QWidget):
         p_pos = parent.pos()
         delta_f = d_freq - p_pos.x()
         delta_a = d_amp  - p_pos.y()
+        unit = getattr(self, "_current_unit", "dBFS")
         return (f"M{mid}{DELTA_SYMBOL}\n"
-                f"{d_freq/1e6:.3f} MHz  "
-                f"{d_amp:.1f} {self._amplitude_unit}\n"
+                f"{d_freq/1e6:.3f} MHz  {d_amp:.1f} dBFS\n"
                 f"{DELTA_SYMBOL}f: {delta_f/1e6:+.3f} MHz\n"
                 f"{DELTA_SYMBOL}A: {delta_a:+.1f} dB")
 
@@ -541,6 +540,14 @@ class SpectrumWidget(QWidget):
     # ------------------------------------------------------------------
     def update_frame(self, frame):
         self._last_frame = frame
+        unit = getattr(frame, "unit", "dBFS")
+        if unit != self._axis_unit:
+            self._axis_unit = unit
+            self.plot_widget.getPlotItem().setLabel(
+                "left", "Amplitude", units=unit,
+                **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"}
+            )
+        self._current_unit = unit
         freq = frame.frequency
         unit = amplitude_unit(frame)
         if unit != self._amplitude_unit:
