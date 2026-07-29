@@ -25,6 +25,7 @@ defaults to **None** so spectrum clicks cannot create markers accidentally.
 
 - [How the project works](#how-the-project-works)
 - [Quick test without hardware](#quick-test-without-hardware)
+- [Web browser version](#web-browser-version)
 - [Installation](#installation)
 - [Running with an SDR](#running-with-an-sdr)
 - [Using the interface](#using-the-interface)
@@ -102,6 +103,42 @@ Then:
    with the new settings and trace history begins again.
 9. Press **Stop** when finished.
 
+## Web browser version
+
+The web console uses the same Python acquisition, DSP, calibration, trace,
+carrier, peak, and measurement pipeline as the desktop application. Spectrum
+frames are sent to each browser as compact binary Float32 WebSocket messages;
+raw IQ remains on the SDR host. Slow browsers automatically receive the newest
+frame instead of building a delayed frame backlog.
+
+Install the Python dependencies, then start a local-only server:
+
+```powershell
+python run_web.py
+```
+
+Open `http://127.0.0.1:8000` and press **Start acquisition**. Simulator mode
+requires no SDR hardware.
+
+To allow other computers on the same approved campus network:
+
+```powershell
+python run_web.py --host 0.0.0.0 --port 8000 --token "replace-with-a-long-random-token"
+```
+
+Users open `http://HOST-IP:8000` and enter that token. The host firewall and
+campus network must permit the selected port. Use a static IP, DHCP reservation,
+or campus DNS name so the address remains stable. Consult campus IT before
+exposing the service outside a controlled lab VLAN; place an HTTPS reverse proxy
+in front of it if traffic crosses an untrusted network.
+
+One browser owns the control lease at a time so two users cannot retune the
+single SDR simultaneously. Other connected browsers remain live viewers and can
+explicitly take control. The web console includes the spectrum, waterfall,
+traces, measurements, carrier overlays, six markers, delta markers, zoom/pan,
+PNG capture, and calibrated raw/dBm CSV export. The desktop application remains
+available through `python run.py`.
+
 ## Installation
 
 ### Required Python and GUI packages
@@ -112,6 +149,8 @@ Then:
 | NumPy | IQ arrays, FFT, traces, and measurements |
 | PyQt6 | Desktop interface and thread-safe signals |
 | pyqtgraph | Spectrum, waterfall, traces, and markers |
+| FastAPI and Uvicorn | Browser API, static UI, and campus web server |
+| WebSockets | Low-latency binary spectrum delivery |
 
 ### Required SDR packages
 
@@ -389,6 +428,7 @@ complete dBm UI path; it does not represent power at a physical RF connector.
 ```text
 freqanalyzer/
 |-- run.py                    Application entry point
+|-- run_web.py                Browser/server entry point
 |-- README.md                 Project overview and usage
 |-- INSTALL.md                Detailed drivers and offline installation
 |-- calibration.md            Frequency and dBFS-to-dBm calibration procedure
@@ -415,6 +455,10 @@ freqanalyzer/
 |   |-- freq_control.py       Frequency/unit input widget
 |   |-- marker_dropdown.py    M1 through M6 selector
 |   `-- recorder.py           Screenshot and CSV export
+|-- webapp/
+|   |-- server.py             Web API, control lease, and SDR coordinator
+|   |-- protocol.py           Binary Float32 spectrum protocol
+|   `-- static/               HTML, CSS, and Canvas/WebGL-free browser UI
 `-- tests/
     |-- test_acquisition.py    Mock SDR and live simulator tests
     |-- test_gui.py            Device profiles and tabbed UI tests
@@ -446,7 +490,7 @@ The tests verify:
 Run a syntax check with:
 
 ```powershell
-python -m compileall backend frontend tests run.py
+python -m compileall backend frontend webapp tests run.py run_web.py
 ```
 
 Passing software tests cannot prove USB drivers, RF input safety, device-specific

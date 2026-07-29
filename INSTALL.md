@@ -142,3 +142,23 @@ The automated DSP, acquisition, and simulator behavior can be tested without har
 ```powershell
 python -m unittest discover -s tests -v
 ```
+# Browser and campus-network operation
+
+The browser console runs on the same computer that has the SDR drivers and
+hardware connection. For local use:
+
+```powershell
+python run_web.py
+```
+
+For access from other computers on an approved campus LAN:
+
+```powershell
+python run_web.py --host 0.0.0.0 --port 8000 --token "replace-with-a-long-random-token"
+```
+
+Allow TCP port 8000 through the host firewall only for the intended campus
+subnet, then browse to `http://HOST-IP:8000`. A static IP, DHCP reservation, or
+campus DNS record is recommended. The token protects analyzer control and live
+data, but plain HTTP does not encrypt it; use a campus-managed HTTPS reverse
+proxy when traffic leaves a trusted lab network.

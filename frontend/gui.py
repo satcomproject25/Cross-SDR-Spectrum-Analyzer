@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.acquisition import create_acquisition
+from backend.device_profiles import DEVICE_PROFILES
 from backend.models import AcquisitionConfig, SpectrumFrame
 from frontend.renderer import SpectrumWidget
 from frontend.waterfall import WaterfallWidget
@@ -36,56 +37,6 @@ from frontend.recorder import Recorder
 from frontend.freq_control import FrequencyControl
 from frontend.marker_dropdown import MarkerSelectorButton
 from frontend.amplitude import amplitude_unit, scalar_amplitude, trace_amplitude
-
-
-DEVICE_PROFILES = {
-    "SIMULATOR": {
-        "sample_rates": ("2", "5", "8", "10", "12.5", "16", "20"),
-        "sample_rate": "20",
-        "max_span_hz": 20e6,
-        "span_hz": 20e6,
-        "summary": "20 MS/s · 20 MHz span",
-        "detail": "Local IQ simulator · no SDR hardware required",
-        "min_frequency_hz": 1e6,
-        "max_frequency_hz": 6e9,
-        "max_gain_db": 62,
-    },
-    "HACKRF": {
-        "sample_rates": ("2", "5", "8", "10", "12.5", "16", "20"),
-        "sample_rate": "20",
-        "max_span_hz": 20e6,
-        "span_hz": 20e6,
-        "summary": "20 MS/s · 20 MHz span",
-        "detail": "HackRF One supported ceiling · dedicated USB 2.0 bus recommended",
-        "min_frequency_hz": 1e6,
-        "max_frequency_hz": 6e9,
-        "max_gain_db": 62,
-    },
-    "USRP": {
-        "sample_rates": ("10", "20", "25", "40", "50", "100", "200"),
-        "sample_rate": "200",
-        "max_span_hz": 160e6,
-        "span_hz": 160e6,
-        "summary": "200 MS/s · 160 MHz span",
-        "detail": "X300-series maximum · requires 160 MHz daughterboard and 10 GigE/PCIe",
-        "min_frequency_hz": 1e6,
-        "max_frequency_hz": 6e9,
-        "max_gain_db": 100,
-    },
-    "PLUTO": {
-        "sample_rates": (
-            "1", "2", "3", "4", "5", "6", "8", "10", "20", "30", "40", "50", "61.44"
-        ),
-        "sample_rate": "4",
-        "max_span_hz": 20e6,
-        "span_hz": 4e6,
-        "summary": "4 MS/s · 4 MHz span",
-        "detail": "ADALM-Pluto · USB or network through SoapyPlutoSDR/libiio",
-        "min_frequency_hz": 325e6,
-        "max_frequency_hz": 3.8e9,
-        "max_gain_db": 73,
-    },
-}
 
 
 # ---------------------------------------------------------------------------
