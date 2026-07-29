@@ -67,7 +67,13 @@
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const message = payload.detail || `Request failed (${response.status})`;
-      if (response.status === 409) updateControlUI(payload);
+      if (response.status === 409) {
+        // refresh lease ownership from the authoritative snapshot
+        fetch(`/api/state?client_id=${encodeURIComponent(clientId)}`, { headers: authHeaders() })
+          .then((r) => r.json())
+          .then(handleServerState)
+          .catch(() => {});
+      }
       throw new Error(message);
     }
     return payload;
