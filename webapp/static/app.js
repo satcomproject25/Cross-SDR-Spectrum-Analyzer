@@ -47,6 +47,9 @@
   const spectrumCtx = spectrum.getContext("2d", { alpha: false });
   const waterfall = $("waterfallCanvas");
   const waterfallCtx = waterfall.getContext("2d", { alpha: false });
+  const waterfallHistory = document.createElement("canvas");
+  const waterfallHistoryCtx = waterfallHistory.getContext("2d", { alpha: false });
+  const WATERFALL_HISTORY_ROWS = 420;
 
   function authHeaders(json = false) {
     const headers = {};
@@ -320,16 +323,16 @@
   }
 
   function updateMeasurements(header, traces) {
-    const peaks = header.peaks || [];
-    let peak = peaks[0];
-    if (!peak && traces.amplitude.length) {
+    const peakTrace = traces[state.markerTrace] || traces.amplitude;
+    let peak = null;
+    if (peakTrace.length) {
       let index = 0;
-      for (let i = 1; i < traces.amplitude.length; i += 1) {
-        if (traces.amplitude[i] > traces.amplitude[index]) index = i;
+      for (let i = 1; i < peakTrace.length; i += 1) {
+        if (peakTrace[i] > peakTrace[index]) index = i;
       }
       peak = {
         frequency: header.frequency_start + header.frequency_step * index,
-        amplitude: traces.amplitude[index],
+        amplitude: peakTrace[index],
         bin: index,
       };
     }
@@ -424,7 +427,13 @@
     for (const [name, visible] of enabled) {
       if (visible) drawTrace(g, header, traces[name], name, startIndex, stopIndex);
     }
-    drawAutoPeak(g, header, traces.amplitude, startIndex, stopIndex);
+    drawAutoPeak(
+      g,
+      header,
+      traces[state.markerTrace] || traces.amplitude,
+      startIndex,
+      stopIndex,
+    );
     drawMarkers(g, header, traces);
   }
 
@@ -479,7 +488,7 @@
       gradient.addColorStop(1, "rgba(69, 213, 154, .02)");
       spectrumCtx.fillStyle = gradient;
       spectrumCtx.fillRect(left, g.top, right - left, g.height);
-      spectrumCtx.strokeStyle = "rgba(69, 213, 154, .35)";
+      spectrumCtx.strokeStyle = "rgba(0, 255, 13, 0.38)";
       spectrumCtx.strokeRect(left, g.top, right - left, g.height);
     }
     spectrumCtx.restore();
@@ -613,47 +622,114 @@
   }
 
   function drawWaterfallRow(frame) {
-    const resized = fitCanvas(waterfall, waterfallCtx);
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cssWidth = waterfall.clientWidth;
-    const cssHeight = waterfall.clientHeight;
-    if (resized) {
-      waterfallCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      waterfallCtx.fillStyle = "#030513";
-      waterfallCtx.fillRect(0, 0, cssWidth, cssHeight);
+    const binCount = frame.header.bins;
+    if (
+      waterfallHistory.width !== binCount
+      || waterfallHistory.height !== WATERFALL_HISTORY_ROWS
+    ) {
+      waterfallHistory.width = binCount;
+      waterfallHistory.height = WATERFALL_HISTORY_ROWS;
+      waterfallHistoryCtx.fillStyle = "#030513";
+      waterfallHistoryCtx.fillRect(
+        0,
+        0,
+        waterfallHistory.width,
+        waterfallHistory.height,
+      );
     }
+    waterfallHistoryCtx.drawImage(
+      waterfallHistory,
+      0,
+      0,
+      waterfallHistory.width,
+      waterfallHistory.height - 1,
+      0,
+      1,
+      waterfallHistory.width,
+      waterfallHistory.height - 1,
+    );
+    const row = waterfallHistoryCtx.createImageData(binCount, 1);
+    const values = frame.traces.amplitude;
+    for (let index = 0; index < binCount; index += 1) {
+      const [r, g, b] = colorForLevel(values[index]);
+      const pixel = index * 4;
+      row.data[pixel] = r;
+      row.data[pixel + 1] = g;
+      row.data[pixel + 2] = b;
+      row.data[pixel + 3] = 255;
+    }
+    waterfallHistoryCtx.putImageData(row, 0, 0);
+  }
+
+  function drawWaterfallViewport() {
+    fitCanvas(waterfall, waterfallCtx);
     waterfallCtx.save();
     waterfallCtx.setTransform(1, 0, 0, 1, 0, 0);
-    waterfallCtx.drawImage(
-      waterfall,
-      0,
-      0,
-      waterfall.width,
-      waterfall.height - dpr,
-      0,
-      dpr,
-      waterfall.width,
-      waterfall.height - dpr,
-    );
-    const rowWidth = Math.max(1, Math.floor(cssWidth * dpr));
-    const row = waterfallCtx.createImageData(rowWidth, Math.max(1, Math.floor(dpr)));
-    const values = frame.traces.amplitude;
-    for (let x = 0; x < rowWidth; x += 1) {
-      const index = Math.min(values.length - 1, Math.floor(x / rowWidth * values.length));
-      const [r, g, b] = colorForLevel(values[index]);
-      for (let y = 0; y < row.height; y += 1) {
-        const p = (y * rowWidth + x) * 4;
-        row.data[p] = r; row.data[p + 1] = g; row.data[p + 2] = b; row.data[p + 3] = 255;
-      }
+    waterfallCtx.fillStyle = "#030513";
+    waterfallCtx.fillRect(0, 0, waterfall.width, waterfall.height);
+
+    if (!state.latestFrame || waterfallHistory.width <= 1) {
+      waterfallCtx.restore();
+      return;
     }
-    waterfallCtx.putImageData(row, 0, 0);
+
+    const { header } = state.latestFrame;
+    const fullStart = header.frequency_start;
+    const fullStop = fullStart + header.frequency_step * (header.bins - 1);
+    const fullWidth = Math.max(header.frequency_step, fullStop - fullStart);
+    const sourceStart = Math.max(
+      0,
+      Math.min(
+        waterfallHistory.width - 1,
+        (state.viewStart - fullStart) / fullWidth * waterfallHistory.width,
+      ),
+    );
+    const sourceStop = Math.max(
+      sourceStart + 1,
+      Math.min(
+        waterfallHistory.width,
+        (state.viewStop - fullStart) / fullWidth * waterfallHistory.width,
+      ),
+    );
+    const dpr = waterfall.width / Math.max(1, waterfall.clientWidth);
+    const destinationLeft = 57 * dpr;
+    const destinationWidth = Math.max(
+      1,
+      (waterfall.clientWidth - 68) * dpr,
+    );
+    waterfallCtx.imageSmoothingEnabled = true;
+    waterfallCtx.drawImage(
+      waterfallHistory,
+      sourceStart,
+      0,
+      sourceStop - sourceStart,
+      waterfallHistory.height,
+      destinationLeft,
+      0,
+      destinationWidth,
+      waterfall.height,
+    );
     waterfallCtx.restore();
   }
 
   function clearWaterfall() {
+    if (state.latestFrame) {
+      waterfallHistory.width = state.latestFrame.header.bins;
+      waterfallHistory.height = WATERFALL_HISTORY_ROWS;
+      waterfallHistoryCtx.fillStyle = "#030513";
+      waterfallHistoryCtx.fillRect(
+        0,
+        0,
+        waterfallHistory.width,
+        waterfallHistory.height,
+      );
+    }
     fitCanvas(waterfall, waterfallCtx);
+    waterfallCtx.save();
+    waterfallCtx.setTransform(1, 0, 0, 1, 0, 0);
     waterfallCtx.fillStyle = "#030513";
-    waterfallCtx.fillRect(0, 0, waterfall.clientWidth, waterfall.clientHeight);
+    waterfallCtx.fillRect(0, 0, waterfall.width, waterfall.height);
+    waterfallCtx.restore();
   }
 
   function renderLoop(now) {
@@ -662,6 +738,7 @@
       drawWaterfallRow(state.latestFrame);
       state.renderedSequence = state.frameSequence;
     }
+    drawWaterfallViewport();
     if (now - state.lastFpsTick >= 1000) {
       state.fps = state.receivedThisSecond * 1000 / (now - state.lastFpsTick);
       state.receivedThisSecond = 0;
@@ -927,7 +1004,23 @@
       $("deltaButton").classList.toggle("active", Boolean(marker && marker.deltaFrequency != null));
       updateMarkerTable();
     }));
-    $("markerTraceSelect").addEventListener("change", () => { state.markerTrace = $("markerTraceSelect").value; });
+    $("markerTraceSelect").addEventListener("change", () => {
+      state.markerTrace = $("markerTraceSelect").value;
+      const traceControl = {
+        amplitude: $("traceLive"),
+        max_hold: $("traceMax"),
+        min_hold: $("traceMin"),
+        average: $("traceAverage"),
+      }[state.markerTrace];
+      traceControl.checked = true;
+      if (state.latestFrame) {
+        updateMeasurements(
+          state.latestFrame.header,
+          state.latestFrame.traces,
+        );
+      }
+      updateMarkerTable();
+    });
     $("peakMarkerButton").addEventListener("click", placeMarkerAtPeak);
     $("deltaButton").addEventListener("click", toggleDelta);
     $("clearMarkersButton").addEventListener("click", () => {
