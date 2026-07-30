@@ -1,10 +1,25 @@
-"""Adaptive multi-carrier detection for spectrum frames."""
+#!/usr/bin/env python3
+"""
+Plot synthetic spectrum with carrier detection thresholds.
 
-from __future__ import annotations
+Displays:
+ - original (unsmoothed) amplitude
+ - smoothed trace used in detection
+ - noise floor (median)
+ - enter threshold line (noise + max(enter_threshold_db, 6*noise_sigma))
+ - exit threshold line (noise + max(exit_threshold_db, 3*noise_sigma))
+ - detected carrier regions (shaded)
 
-from dataclasses import dataclass
+Runs the exact CarrierDetectionEngine from the attached code.
+"""
 
 import numpy as np
+import matplotlib.pyplot as plt
+
+# ----------------------------------------------------------------------
+# Copy of the carrier detection engine (unchanged)
+# ----------------------------------------------------------------------
+from dataclasses import dataclass
 
 
 @dataclass(slots=True)
@@ -19,14 +34,7 @@ class CarrierRegion:
 
 
 class CarrierDetectionEngine:
-    """Detect sustained occupied bands and align them to their onset edges.
-
-    A candidate must contain a strong, spectrally sustained core. Once seeded,
-    both boundaries are expanded to a lower threshold and refined against the
-    unsmoothed spectrum. This frequency-domain hysteresis keeps low noise-floor
-    humps from creating carriers without cutting off the beginning of a real
-    carrier's rising edge.
-    """
+    """Detect sustained occupied bands and align them to their onset edges."""
 
     def __init__(
         self,
@@ -52,8 +60,6 @@ class CarrierDetectionEngine:
         self.enter_threshold_db = float(enter_threshold_db)
         self.exit_threshold_db = float(exit_threshold_db)
         self.smoothing_window = smoothing_window
-        # This now means minimum consecutive strong-core bins, not minimum
-        # total region width. The latter changes in Hz with every device/RBW.
         self.minimum_width_bins = int(minimum_width_bins)
         self.merge_gap_bins = int(merge_gap_bins)
 
@@ -73,9 +79,6 @@ class CarrierDetectionEngine:
         if window <= 1:
             return spectrum.copy()
         half = window // 2
-        # Edge padding is essential for dB data. np.convolve(mode="same")
-        # implicitly inserts 0 dB outside the FFT, manufacturing large edge
-        # peaks beside a -70 to -100 dB receiver floor.
         padded = np.pad(spectrum, (half, half), mode="edge")
         cumulative = np.cumsum(np.insert(padded, 0, 0.0))
         return (cumulative[window:] - cumulative[:-window]) / window
@@ -101,13 +104,10 @@ class CarrierDetectionEngine:
 
     @staticmethod
     def _noise_statistics(smoothed: np.ndarray) -> tuple[float, float]:
-        """Estimate background level while excluding occupied upper bins."""
         upper_noise_limit = float(np.percentile(smoothed, 60.0))
         noise_samples = smoothed[smoothed <= upper_noise_limit]
         noise_floor = float(np.median(noise_samples))
 
-        # A first-difference MAD measures floor roughness without mistaking a
-        # slow device passband slope for random noise variation.
         differences = np.diff(smoothed)
         if differences.size:
             median_difference = float(np.median(differences))
@@ -193,8 +193,6 @@ class CarrierDetectionEngine:
         core_trace = self._moving_average(amplitude, window)
         noise, noise_sigma = self._noise_statistics(core_trace)
 
-        # Rougher receivers automatically require more separation, while the
-        # configured margins remain the minimum sensitivity guarantees.
         enter_level = noise + max(self.enter_threshold_db, 6.0 * noise_sigma)
         exit_level = noise + max(self.exit_threshold_db, 3.0 * noise_sigma)
         core_mask = core_trace >= enter_level
@@ -202,8 +200,6 @@ class CarrierDetectionEngine:
         carriers: list[CarrierRegion] = []
 
         for region_start, region_stop in self._runs(occupied_mask):
-            # Without background bins on both sides there is no complete band
-            # edge to measure. This rejects FFT boundary/passband artifacts.
             if region_start == 0 or region_stop == amplitude.size - 1:
                 continue
 
@@ -216,8 +212,6 @@ class CarrierDetectionEngine:
             core_stop = int(core_bins[-1])
             padding = window // 2 + 2
 
-            # Refine on unsmoothed bins. Three consecutive crossings prevent a
-            # single noisy bin from pulling the band ahead of the rising edge.
             left_bin = self._first_confirmed_above(
                 amplitude,
                 exit_level,
@@ -257,3 +251,102 @@ class CarrierDetectionEngine:
             )
 
         return self._merge_regions(carriers)
+
+
+# ----------------------------------------------------------------------
+# Create a synthetic spectrum for demonstration
+# ----------------------------------------------------------------------
+def generate_test_spectrum(num_bins=1024, noise_floor_dbm=-85.0):
+    """Return 1D amplitude array (dB scale) with noise + a few 'carriers'."""
+    rng = np.random.default_rng(42)
+    # Gaussian noise in linear scale, then convert to dB
+    noise_linear = 10 ** (noise_floor_dbm / 10.0)
+    raw = rng.normal(loc=0.0, scale=np.sqrt(noise_linear / 2), size=num_bins) + \
+          1j * rng.normal(loc=0.0, scale=np.sqrt(noise_linear / 2), size=num_bins)
+
+    # Add a few raised bumps (carriers)
+    carrier_params = [
+        (200, 60, 15),   # center_bin, width_bins, snr_db
+        (450, 40, 20),
+        (700, 80, 12),
+        (850, 30, 25),
+    ]
+    for center, width, snr in carrier_params:
+        # Gaussian bump in linear scale
+        x = np.arange(num_bins)
+        bump = np.exp(-0.5 * ((x - center) / (width / 2.355)) ** 2)  # FWHM approx width
+        bump_linear = 10 ** ((noise_floor_dbm + snr) / 10.0) * bump
+        raw += bump_linear
+
+    # Power spectrum (linear) -> dB
+    power = np.abs(raw) ** 2
+    # Ensure no zero values
+    power[power < 1e-18] = 1e-18
+    db = 10 * np.log10(power)
+    return db
+
+
+# ----------------------------------------------------------------------
+# Main: run detection and plot
+# ----------------------------------------------------------------------
+def main():
+    # Generate spectrum
+    num_bins = 1024
+    amplitude = generate_test_spectrum(num_bins)
+
+    # Create engine with default parameters
+    engine = CarrierDetectionEngine(
+        enter_threshold_db=10.0,
+        exit_threshold_db=3.0,
+        minimum_width_bins=20,   # lower to catch our test bumps
+        merge_gap_bins=0,
+    )
+
+    # Replicate the first part of engine.detect() to get intermediate values
+    # (we need the smoothed trace and the thresholds for plotting).
+    # We'll call engine.detect() to get carriers, but we also want to access
+    # the smoothed trace, noise, etc. For simplicity we re-run the beginning.
+    amp = np.asarray(amplitude, dtype=np.float64)
+    window = engine._window_for(amp.size)
+    core_trace = CarrierDetectionEngine._moving_average(amp, window)
+    noise, noise_sigma = CarrierDetectionEngine._noise_statistics(core_trace)
+
+    enter_level = noise + max(engine.enter_threshold_db, 6.0 * noise_sigma)
+    exit_level = noise + max(engine.exit_threshold_db, 3.0 * noise_sigma)
+
+    # Full detection
+    carriers = engine.detect(amplitude)
+
+    # Plot
+    bins = np.arange(num_bins)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(bins, amplitude, alpha=0.5, label="Original spectrum (unsmoothed)")
+    plt.plot(bins, core_trace, 'k', linewidth=1.2, label="Smoothed trace (core_trace)")
+
+    # Threshold lines
+    plt.axhline(y=noise, color='grey', linestyle='--', linewidth=1,
+                label=f"Noise floor = {noise:.1f} dB")
+    plt.axhline(y=enter_level, color='red', linestyle='-', linewidth=1.2,
+                label=f"Enter threshold = {enter_level:.1f} dB (noise + max(enter_db, 6σ))")
+    plt.axhline(y=exit_level, color='orange', linestyle='-', linewidth=1.2,
+                label=f"Exit threshold = {exit_level:.1f} dB (noise + max(exit_db, 3σ))")
+
+    # Shade detected carrier regions
+    ymin, ymax = plt.ylim()
+    for region in carriers:
+        plt.axvspan(region.left_bin, region.right_bin, facecolor='green', alpha=0.15)
+        # mark center
+        plt.axvline(x=region.center_bin, color='darkgreen', linestyle=':', linewidth=1)
+
+    plt.xlabel("Frequency bin")
+    plt.ylabel("Amplitude (dB)")
+    plt.title("Carrier Detection Thresholds and Detected Regions")
+    plt.legend(loc='upper right', fontsize='small')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()

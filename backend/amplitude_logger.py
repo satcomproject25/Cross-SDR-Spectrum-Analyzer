@@ -1,4 +1,4 @@
-"""Continuous amplitude logging at up to two user-selected carrier frequencies.
+"""Continuous amplitude logging at user-selected carrier frequencies.
 
 Design notes
 ------------
@@ -6,23 +6,28 @@ Design notes
   per displayed SpectrumFrame (~30 Hz) and only does work every LOG_INTERVAL_S
   seconds. No separate thread/timer is needed and there is no cross-thread
   state to guard.
-- One CSV file per acquisition *session* (start Logger -> stop/close app).
-  If the app is started/stopped multiple times on the same calendar day, each
-  session gets its own file: <DD-MM-YYYY>_1.csv, <DD-MM-YYYY>_2.csv, ...
-- Files are organized as data/logs/<YYYY>/<MM>/<DD>/<DD-MM-YYYY>_<N>.csv so a
-  day's sessions are easy to find and the plotting dialog can browse by
-  Year -> Month -> Day.
-- Amplitude is read from whichever calibrated field the rest of the app is
-  currently displaying (dBm if calibrated, dBFS otherwise) so logged values
-  always match the on-screen unit. The unit actually used is written into the
-  CSV header so a later dBm/dBFS switch (e.g. recalibration) can't silently
-  mix units inside one file.
+- ONE CSV FILE PER CALENDAR DAY: data/logs/<YYYY>/<MM>/<DD>/<DD-MM-YYYY>.csv.
+  Starting the logger multiple times on the same day appends to the same
+  file rather than creating _1/_2/_3 files. Logging simply pauses when the
+  session stops and resumes (appending) the next time it is started.
+- Because different sessions on the same day may track different frequency
+  sets, there is no single shared header row. Instead every session writes
+  its own marker/header line:
+      #SESSION#,<HH:MM:SS start time>,<freq1 label>,<freq2 label>,...
+  followed by that session's data rows. This makes appending trivial (pure
+  append-only, never a rewrite of existing content) and lets the plot
+  dialog reconstruct exactly which columns applied to which rows, and where
+  each session boundary falls, purely by re-reading the file top to bottom.
+- Amplitude is read from the "average" trace (TraceEngine's running
+  linear-power average), not the instantaneous clear-write/CW trace, so a
+  10 s sample reflects the settled carrier level rather than one noisy FFT
+  frame. average_dbm/average_dbfs is always populated on every SpectrumFrame
+  regardless of whether the Average trace is checked on-screen.
 """
 
 from __future__ import annotations
 
 import csv
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,10 +36,9 @@ from pathlib import Path
 import numpy as np
 
 LOG_INTERVAL_S = 10.0
-MAX_TRACKED_FREQUENCIES = 2
 DEFAULT_LOG_ROOT = Path(__file__).resolve().parents[1] / "data" / "logs"
 
-_SESSION_FILENAME_RE = re.compile(r"^(\d{2}-\d{2}-\d{4})_(\d+)\.csv$")
+SESSION_MARKER = "#SESSION#"
 
 
 class LoggerValidationError(ValueError):
@@ -65,28 +69,15 @@ def validate_frequency_in_span(
         )
 
 
-def _existing_session_indices(day_dir: Path, date_stamp: str) -> list[int]:
-    if not day_dir.exists():
-        return []
-    indices = []
-    for entry in day_dir.iterdir():
-        match = _SESSION_FILENAME_RE.match(entry.name)
-        if match and match.group(1) == date_stamp:
-            indices.append(int(match.group(2)))
-    return indices
-
-
-def _next_session_path(root: Path, now: datetime) -> Path:
+def _day_path(root: Path, now: datetime) -> Path:
     day_dir = root / f"{now.year:04d}" / f"{now.month:02d}" / f"{now.day:02d}"
-    date_stamp = now.strftime("%d-%m-%Y")
-    existing = _existing_session_indices(day_dir, date_stamp)
-    next_index = max(existing, default=0) + 1
     day_dir.mkdir(parents=True, exist_ok=True)
-    return day_dir / f"{date_stamp}_{next_index}.csv"
+    date_stamp = now.strftime("%d-%m-%Y")
+    return day_dir / f"{date_stamp}.csv"
 
 
 class AmplitudeLogger:
-    """Owns one active CSV session and samples amplitude from live frames.
+    """Owns the active daily CSV and samples amplitude from live frames.
 
     Usage:
         logger = AmplitudeLogger(log_root=...)
@@ -95,6 +86,8 @@ class AmplitudeLogger:
         logger.on_frame(frame)   # call once per delivered SpectrumFrame
         ...
         logger.stop()
+        # later the same day:
+        logger.start(frequencies_hz=[915e6], unit="dBm")   # appends to same file
     """
 
     def __init__(self, log_root: Path | None = None):
@@ -122,20 +115,18 @@ class AmplitudeLogger:
     def start(self, frequencies_hz: list[float], unit: str, now: datetime | None = None) -> Path:
         if self._active:
             raise RuntimeError("Logger session already active; call stop() first")
-        if not (1 <= len(frequencies_hz) <= MAX_TRACKED_FREQUENCIES):
-            raise ValueError(
-                f"Provide between 1 and {MAX_TRACKED_FREQUENCIES} frequencies"
-            )
+        if len(frequencies_hz) < 1:
+            raise ValueError("Provide at least one frequency")
 
         now = now or datetime.now()
-        path = _next_session_path(self.log_root, now)
+        path = _day_path(self.log_root, now)
 
-        header = ["timestamp"] + [
+        session_header = [SESSION_MARKER, now.strftime("%H:%M:%S")] + [
             f"{freq / 1e6:.6f} MHz ({unit})" for freq in frequencies_hz
         ]
-        with open(path, "w", newline="") as f:
+        with open(path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(header)
+            writer.writerow(session_header)
 
         self._frequencies = list(frequencies_hz)
         self._bin_indices = [None] * len(frequencies_hz)  # resolved on first frame
@@ -166,13 +157,6 @@ class AmplitudeLogger:
 
         from frontend.amplitude import trace_amplitude  # local import: avoid Qt at module load
 
-        # Log from "average" (TraceEngine's running linear-power average),
-        # not "amplitude" (the instantaneous clear-write/CW trace). CW jumps
-        # every single FFT frame; average settles toward the true carrier
-        # level, so a 10 s sample is representative instead of a noisy
-        # snapshot. average_dbm/average_dbfs is always populated on every
-        # SpectrumFrame regardless of whether the Average trace is checked
-        # on-screen, so this doesn't depend on GUI toggle state.
         frequency_axis = np.asarray(frame.frequency)
         amplitude = np.asarray(trace_amplitude(frame, "average"))
 
@@ -214,39 +198,76 @@ class AmplitudeLogger:
             return []
         return sorted(p.name for p in month_dir.iterdir() if p.is_dir())
 
-    def sessions_for_day(self, year: str, month: str, day: str) -> list[Path]:
+    def day_file(self, year: str, month: str, day: str) -> Path | None:
+        """Return the single CSV file for a given day, if it exists."""
         day_dir = self.log_root / year / month / day
         if not day_dir.exists():
-            return []
-        return sorted(
-            day_dir.glob("*.csv"),
-            key=lambda p: int(_SESSION_FILENAME_RE.match(p.name).group(2))
-            if _SESSION_FILENAME_RE.match(p.name)
-            else 0,
-        )
+            return None
+        matches = sorted(day_dir.glob("*.csv"))
+        return matches[0] if matches else None
 
     @staticmethod
-    def read_session(
+    def read_day_file(
         path: Path,
-    ) -> tuple[list[str], list[str], list[list[float]]]:
-        """Return (timestamps, frequency_column_labels, columns).
+    ) -> tuple[list[str], list[str], list[list[float]], list[int]]:
+        """Parse one day's CSV, concatenating every session in file order.
 
-        `columns[i]` is one frequency's list of amplitude values, aligned
-        index-for-index with `timestamps` (both are per logged row, HH:MM:SS).
+        Returns:
+            timestamps: HH:MM:SS strings, one per logged data row, across
+                every session in the file (session marker rows excluded).
+            column_labels: frequency-column labels, in first-seen order
+                (union across all sessions in the file).
+            columns: columns[i] holds one frequency-column's amplitude
+                values. Because different sessions can log different
+                frequency sets, this uses the UNION of all column labels
+                seen in the file; rows from a session that didn't track a
+                given column are filled with NaN so every column stays
+                aligned index-for-index with `timestamps`.
+            session_boundaries: row indices (into `timestamps`) where a new
+                session began, for the plot dialog to draw divider lines.
+                Index 0 (the very first session) is included.
         """
+        column_labels: list[str] = []
+        column_index_by_label: dict[str, int] = {}
+        timestamps: list[str] = []
+        columns: list[list[float]] = []
+        session_boundaries: list[int] = []
+
+        current_session_columns: list[int] = []  # column index for each position in the active session's header
+
         with open(path, newline="") as f:
             reader = csv.reader(f)
-            header = next(reader)
-            freq_labels = header[1:]
-            columns: list[list[float]] = [[] for _ in freq_labels]
-            timestamps: list[str] = []
             for row in reader:
                 if not row:
                     continue
+                if row[0] == SESSION_MARKER:
+                    session_boundaries.append(len(timestamps))
+                    labels = row[2:]
+                    current_session_columns = []
+                    for label in labels:
+                        if label not in column_index_by_label:
+                            column_index_by_label[label] = len(column_labels)
+                            column_labels.append(label)
+                            # Backfill NaN for every row already seen so this
+                            # new column stays aligned with `timestamps`.
+                            columns.append([float("nan")] * len(timestamps))
+                        current_session_columns.append(column_index_by_label[label])
+                    continue
+
+                # Data row: pad every existing column for this row first
+                # (covers columns this session doesn't track), then fill in
+                # the ones it does.
+                row_index = len(timestamps)
                 timestamps.append(row[0])
-                for i, raw_value in enumerate(row[1:]):
+                for column in columns:
+                    column.append(float("nan"))
+                for position, raw_value in enumerate(row[1:]):
+                    if position >= len(current_session_columns):
+                        break
+                    column_index = current_session_columns[position]
                     try:
-                        columns[i].append(float(raw_value))
+                        columns[column_index][row_index] = float(raw_value)
                     except ValueError:
-                        columns[i].append(float("nan"))
-        return timestamps, freq_labels, columns
+                        columns[column_index][row_index] = float("nan")
+
+        return timestamps, column_labels, columns, session_boundaries
