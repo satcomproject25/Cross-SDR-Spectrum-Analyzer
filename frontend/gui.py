@@ -31,12 +31,14 @@ if str(ROOT) not in sys.path:
 from backend.acquisition import create_acquisition
 from backend.device_profiles import DEVICE_PROFILES
 from backend.models import AcquisitionConfig, SpectrumFrame
+from backend.amplitude_logger import AmplitudeLogger
 from frontend.renderer import SpectrumWidget
 from frontend.waterfall import WaterfallWidget
 from frontend.recorder import Recorder
 from frontend.freq_control import FrequencyControl
 from frontend.marker_dropdown import MarkerSelectorButton
 from frontend.amplitude import amplitude_unit, scalar_amplitude, trace_amplitude
+from frontend.logger_panel import LoggerSetupDialog, LoggerPlotDialog
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +354,15 @@ class MainWindow(QMainWindow):
                 background: #0B353C;
                 border-color: #33D6EE;
             }
+            QPushButton#LoggerButton {
+                background: #171717;
+                border: 1px solid #484848;
+            }
+            QPushButton#LoggerButton:checked {
+                background: #4A1212;
+                border-color: #E23636;
+                color: #FFB3B3;
+            }
             QToolTip {
                 background-color: #161616;
                 color: #FFFFFF;
@@ -487,6 +498,37 @@ class MainWindow(QMainWindow):
         self.lbl_profile_detail.setObjectName("ProfileDetail")
         self.lbl_profile_detail.setWordWrap(True)
         layout.addWidget(self.lbl_profile_detail)
+
+        layout.addStretch(1)
+
+        # Amplitude Logger group — pinned to the bottom of the left panel.
+        grp_logger = QGroupBox("Amplitude Logger")
+        lyt_logger = QVBoxLayout(grp_logger)
+        self.btn_logger = QPushButton("Logger")
+        self.btn_logger.setObjectName("LoggerButton")
+        self.btn_logger.setCheckable(True)
+        self.btn_logger.setMinimumHeight(40)
+        self.btn_logger.setToolTip(
+            "Log the amplitude of up to 2 carrier frequencies to CSV every 10 s"
+        )
+        self.btn_logger_plot = QPushButton("Plot Logged Data")
+        lyt_logger.addWidget(self.btn_logger)
+        lyt_logger.addWidget(self.btn_logger_plot)
+        self.lbl_logger_status = QLabel("Logging: OFF")
+        self.lbl_logger_status.setObjectName("SectionLabel")
+        lyt_logger.addWidget(self.lbl_logger_status)
+        layout.addWidget(grp_logger)
+
+        # Every input the operator can use to change acquisition parameters.
+        # All of these are locked while a logging session is active so the
+        # frequency being logged always stays inside the live span.
+        self._acquisition_controls = [
+            self.center_freq_ctrl,
+            self.span_ctrl,
+            self.sample_rate_combo,
+            self.gain_spin,
+            self.sdr_type_combo,
+        ]
 
         self.left_dock.setWidget(container)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
@@ -736,7 +778,8 @@ class MainWindow(QMainWindow):
     # -----------------------------------------------------------------------
     def _wire_actions(self):
         self.recorder = Recorder(self)
-        
+        self.amplitude_logger = AmplitudeLogger()
+
         # Toolbar actions
         self.btn_run_stop.clicked.connect(self._toggle_run)
         
@@ -750,6 +793,10 @@ class MainWindow(QMainWindow):
         
         self.btn_screenshot.clicked.connect(lambda: self.recorder.take_screenshot())
         self.btn_export_csv.clicked.connect(lambda: self.recorder.export_csv(self._last_frame))
+
+        # Amplitude logger actions
+        self.btn_logger.clicked.connect(self._on_logger_button_clicked)
+        self.btn_logger_plot.clicked.connect(self._on_logger_plot_clicked)
 
         # Marker actions
         self.spectrum_widget.markers_changed.connect(self._on_markers_changed)
@@ -997,6 +1044,7 @@ class MainWindow(QMainWindow):
         self.btn_run_stop.setText("Start acquisition")
         self.lbl_device_status.setText("Device: Idle")
         self.backend.stop()
+        self._stop_logging()
 
     def _on_backend_status(self, status: str):
         if self._is_running or status != "Idle":
@@ -1010,6 +1058,7 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self.btn_run_stop.setChecked(False)
         self.btn_run_stop.setText("Start acquisition")
+        self._stop_logging()
 
     def _on_frame_ready(self, frame: SpectrumFrame):
         self._last_frame = frame
@@ -1019,6 +1068,9 @@ class MainWindow(QMainWindow):
         self.reference_level_spin.setSuffix(f" {unit}")
         self.spectrum_widget.update_frame(frame)
         self.waterfall_widget.update_frame(frame)
+
+        if self.amplitude_logger.is_active:
+            self.amplitude_logger.on_frame(frame)
 
         peaks = getattr(frame, "peaks_dbm", None) if unit == "dBm" else None
         if not peaks:
@@ -1189,6 +1241,59 @@ class MainWindow(QMainWindow):
             self.reference_level_spin.value(),
         )
 
+    # -----------------------------------------------------------------------
+    # Amplitude Logger
+    # -----------------------------------------------------------------------
+    def _on_logger_button_clicked(self):
+        if self.amplitude_logger.is_active:
+            # Button was checked -> user clicked to turn logging OFF.
+            self._stop_logging()
+            return
+
+        # Button click checked it, but we only commit to logging once the
+        # setup dialog is accepted; otherwise revert the visual state.
+        self.btn_logger.setChecked(False)
+
+        if not self._is_running:
+            self.status_bar.showMessage(
+                "Start acquisition before starting the amplitude logger.", 5000
+            )
+            return
+
+        center_frequency_hz = self.center_freq_ctrl.value_hz()
+        span_hz = self.span_ctrl.value_hz()
+        dialog = LoggerSetupDialog(center_frequency_hz, span_hz, parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+
+        frequencies_hz = dialog.result_frequencies_hz()
+        if not frequencies_hz:
+            return
+
+        unit = self._current_unit
+        path = self.amplitude_logger.start(frequencies_hz, unit=unit)
+        self.btn_logger.setChecked(True)
+        self.lbl_logger_status.setText(f"Logging: ON -> {path.name}")
+        self._set_acquisition_controls_locked(True)
+        self.status_bar.showMessage(f"Amplitude logging started: {path}", 5000)
+
+    def _stop_logging(self):
+        if not self.amplitude_logger.is_active:
+            self.btn_logger.setChecked(False)
+            return
+        self.amplitude_logger.stop()
+        self.btn_logger.setChecked(False)
+        self.lbl_logger_status.setText("Logging: OFF")
+        self._set_acquisition_controls_locked(False)
+
+    def _set_acquisition_controls_locked(self, locked: bool):
+        for widget in self._acquisition_controls:
+            widget.setEnabled(not locked)
+
+    def _on_logger_plot_clicked(self):
+        dialog = LoggerPlotDialog(self.amplitude_logger, parent=self)
+        dialog.exec()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_panel_toggles()
@@ -1197,6 +1302,7 @@ class MainWindow(QMainWindow):
             self.delta_readout.move(self.width() - self.delta_readout.width() - 320, 100)
 
     def closeEvent(self, event):
+        self._stop_logging()
         self.backend.stop()
         super().closeEvent(event)
 
