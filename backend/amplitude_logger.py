@@ -166,8 +166,15 @@ class AmplitudeLogger:
 
         from frontend.amplitude import trace_amplitude  # local import: avoid Qt at module load
 
+        # Log from "average" (TraceEngine's running linear-power average),
+        # not "amplitude" (the instantaneous clear-write/CW trace). CW jumps
+        # every single FFT frame; average settles toward the true carrier
+        # level, so a 10 s sample is representative instead of a noisy
+        # snapshot. average_dbm/average_dbfs is always populated on every
+        # SpectrumFrame regardless of whether the Average trace is checked
+        # on-screen, so this doesn't depend on GUI toggle state.
         frequency_axis = np.asarray(frame.frequency)
-        amplitude = np.asarray(trace_amplitude(frame, "amplitude"))
+        amplitude = np.asarray(trace_amplitude(frame, "average"))
 
         if not self._resolved:
             self._bin_indices = [
