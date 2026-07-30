@@ -9,6 +9,7 @@ from .measurements import MeasurementEngine
 from .models import IQFrame, Peak, SpectrumFrame
 from .peak import PeakEngine
 from .carrier_detection import CarrierDetectionEngine
+from .carrier_measure import CarrierMeasurementEngine, CarrierTracker
 from .trace import TraceEngine
 from .power_calibration import dbfs_to_dbm
 
@@ -34,6 +35,8 @@ class AnalyzerPipeline:
         self.measurements = MeasurementEngine()
         self.peaks = PeakEngine()
         self.carrier_detector = CarrierDetectionEngine()
+        self.carrier_measure = CarrierMeasurementEngine()
+        self.carrier_tracker = CarrierTracker()
         self.frame_count = 0
 
     def process(self, samples) -> SpectrumFrame:
@@ -46,7 +49,11 @@ class AnalyzerPipeline:
         spectrum = self.dsp.process(iq_frame, self.config.span)
 
         traces = self.traces.update(spectrum)
-        carriers = self.carrier_detector.detect(traces.live)
+        regions = self.carrier_detector.detect(traces.live)
+        measured = self.carrier_measure.measure(
+            regions, traces.live, traces.frequency, spectrum.rbw
+        )
+        carriers = self.carrier_tracker.update(measured, spectrum.rbw)
         measurements = self.measurements.update(traces)
         peaks = self.peaks.find(traces)
 
@@ -81,7 +88,23 @@ class AnalyzerPipeline:
             noise_floor_dbm = None
             channel_power_dbm = None
 
+        for track in carriers:
+            track.band_power_dbfs = track.band_power
+            track.band_power_dbm = (
+                track.band_power + self.power_offset_db
+                if self.power_offset_db is not None else None
+            )
+            
+        if self.frame_count % 30 == 0 and carriers:
+            print(type(carriers[0]).__name__)
+        
         self.frame_count += 1
+        
+        if self.frame_count % 30 == 0:
+            for c in carriers:
+                print(f"{c.label} {c.center_frequency/1e6:.3f} MHz "
+                      f"{c.occupied_bandwidth/1e3:.1f} kHz {c.band_power_dbfs:.2f}")
+        
         return SpectrumFrame(
             frequency=traces.frequency,
             amplitude=traces.live,
@@ -122,3 +145,4 @@ class AnalyzerPipeline:
 
     def clear_traces(self):
         self.traces.clear()
+        self.carrier_tracker.reset()

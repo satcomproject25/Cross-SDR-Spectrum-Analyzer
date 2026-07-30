@@ -190,6 +190,8 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self._last_frame = None
         self._last_frame_time = None
+        self._last_carrier_table_time = 0.0
+        self._carrier_table_unit = "dBFS"
         self._min_hold_was_enabled = False
         self._current_unit = "dBFS"
         # Base Layout Initialization
@@ -535,6 +537,25 @@ class MainWindow(QMainWindow):
         lyt_meas.addRow("Channel Power:", self.lbl_meas_chan_pwr)
         measurements_layout.addWidget(grp_meas)
 
+        grp_carriers = QGroupBox("Live Carriers")
+        lyt_carriers = QVBoxLayout(grp_carriers)
+        self.table_carriers = QTableWidget(0, 4)
+        self.table_carriers.setHorizontalHeaderLabels(
+            ["ID", "Centre MHz", "OBW kHz", "Power dBFS"]
+        )
+        self.table_carriers.verticalHeader().setVisible(False)
+        self.table_carriers.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_carriers.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        header = self.table_carriers.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for col in (1, 2, 3):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        self.table_carriers.setMinimumHeight(150)
+        lyt_carriers.addWidget(self.table_carriers)
+        measurements_layout.addWidget(grp_carriers)
+        
         grp_export = QGroupBox("Capture & Export")
         export_layout = QHBoxLayout(grp_export)
         self.btn_screenshot = QPushButton("Screenshot")
@@ -1046,6 +1067,10 @@ class MainWindow(QMainWindow):
         if self._last_frame_time is not None and now > self._last_frame_time:
             self.lbl_fps.setText(f"FPS: {1.0/(now-self._last_frame_time):.1f}")
         self._last_frame_time = now
+        now_table = time.monotonic()
+        if now_table - self._last_carrier_table_time >= 0.20:
+            self._last_carrier_table_time = now_table
+            self._update_carrier_table(frame)
     # -----------------------------------------------------------------------
     # Marker & Delta Logic
     # -----------------------------------------------------------------------
@@ -1178,7 +1203,46 @@ class MainWindow(QMainWindow):
                 self.table_markers.setItem(row, 3, delta_item)
         finally:
             self.table_markers.blockSignals(False)
+    def _update_carrier_table(self, frame):
+        table = self.table_carriers
+        carriers = frame.carriers
+        calibrated = getattr(frame, "power_calibrated", False)
+        unit = getattr(frame, "amplitude_unit", "dBFS")
 
+        if unit != self._carrier_table_unit:
+            self._carrier_table_unit = unit
+            table.setHorizontalHeaderLabels(
+                ["ID", "Centre MHz", "OBW kHz", f"Power {unit}"]
+            )
+
+        table.setUpdatesEnabled(False)
+        try:
+            if table.rowCount() != len(carriers):
+                table.setRowCount(len(carriers))
+            for row, c in enumerate(carriers):
+                if calibrated and c.band_power_dbm is not None:
+                    power = c.band_power_dbm
+                else:
+                    power = c.band_power_dbfs
+                values = (
+                    c.label,
+                    f"{c.center_frequency / 1e6:.3f}",
+                    f"{c.occupied_bandwidth / 1e3:.1f}",
+                    f"{power:.2f}",
+                )
+                for col, text in enumerate(values):
+                    item = table.item(row, col)
+                    if item is None:
+                        item = QTableWidgetItem()
+                        item.setTextAlignment(
+                            Qt.AlignmentFlag.AlignRight
+                            | Qt.AlignmentFlag.AlignVCenter
+                        )
+                        table.setItem(row, col, item)
+                    item.setText(text)
+        finally:
+            table.setUpdatesEnabled(True)
+    
     def _reference_level_changed(self):
         self.spectrum_widget.set_reference_level(
             self.reference_level_spin.value(),
