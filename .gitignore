@@ -7,3 +7,6 @@ __pycache__/
 
 ./web
 ./SpectrumAnalyzer_build
+
+./data
+

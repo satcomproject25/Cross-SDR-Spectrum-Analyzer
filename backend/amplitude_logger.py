@@ -10,6 +10,13 @@ Design notes
   Starting the logger multiple times on the same day appends to the same
   file rather than creating _1/_2/_3 files. Logging simply pauses when the
   session stops and resumes (appending) the next time it is started.
+- MIDNIGHT ROLLOVER: a session can run across midnight (e.g. 6 PM to 10 AM).
+  on_frame() checks the calendar date on every sample and, if it has
+  changed since the currently open file was selected, transparently closes
+  out the old day's file and opens (or appends to) the new day's file with
+  a fresh #SESSION# marker -- without the user touching the Logger button
+  and without dropping a sample. The 10 s cadence is preserved across the
+  rollover (see on_frame()).
 - Because different sessions on the same day may track different frequency
   sets, there is no single shared header row. Instead every session writes
   its own marker/header line:
@@ -97,6 +104,7 @@ class AmplitudeLogger:
         self._bin_indices: list[int] = []
         self._unit = "dBFS"
         self._path: Path | None = None
+        self._current_date = None
         self._last_log_monotonic = 0.0
         self._resolved = False
 
@@ -132,6 +140,7 @@ class AmplitudeLogger:
         self._bin_indices = [None] * len(frequencies_hz)  # resolved on first frame
         self._unit = unit
         self._path = path
+        self._current_date = now.date()
         self._active = True
         self._resolved = False
         # Force an immediate sample on the next frame rather than waiting a
@@ -142,14 +151,49 @@ class AmplitudeLogger:
     def stop(self) -> None:
         self._active = False
         self._path = None
+        self._current_date = None
         self._frequencies = []
         self._bin_indices = []
         self._resolved = False
+
+    def _roll_over_if_needed(self) -> None:
+        """Switch the active file to today's if the calendar date has advanced.
+
+        Called on every frame while a session is active. A session that runs
+        past midnight (e.g. 6 PM to 10 AM) must keep writing continuously --
+        this closes out the old day's file (nothing to explicitly "close",
+        since every write already opens/appends/closes the file handle) and
+        starts appending into the new day's file instead, with its own
+        #SESSION# marker so read_day_file() can tell where the new file's
+        data begins. Frequencies, unit, resolved bin indices, and the 10 s
+        cadence (`_last_log_monotonic`) are all preserved across the switch
+        -- only the destination file changes.
+        """
+        now = datetime.now()
+        if self._current_date is not None and now.date() == self._current_date:
+            return
+
+        new_path = _day_path(self.log_root, now)
+        session_header = [SESSION_MARKER, now.strftime("%H:%M:%S")] + [
+            f"{freq / 1e6:.6f} MHz ({self._unit})" for freq in self._frequencies
+        ]
+        with open(new_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(session_header)
+
+        self._path = new_path
+        self._current_date = now.date()
+        # Bin indices were resolved against a live frame's frequency axis;
+        # that axis doesn't change across midnight (center/span aren't
+        # editable while logging is active), so there's no need to force
+        # re-resolution -- _resolved and _bin_indices are left untouched.
 
     def on_frame(self, frame) -> bool:
         """Sample and append a row if LOG_INTERVAL_S has elapsed. Returns True if a row was written."""
         if not self._active:
             return False
+
+        self._roll_over_if_needed()
 
         now_monotonic = time.monotonic()
         if now_monotonic - self._last_log_monotonic < LOG_INTERVAL_S:

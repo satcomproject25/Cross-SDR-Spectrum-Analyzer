@@ -38,8 +38,6 @@ class CarrierTrack:
     age: int = 0
     confirmed: bool = False
     confidence: float = 0.0
-    band_power_dbfs: float = 0.0
-    band_power_dbm: float | None = None
     _power_lin: float = field(default=0.0, repr=False)
 
 
