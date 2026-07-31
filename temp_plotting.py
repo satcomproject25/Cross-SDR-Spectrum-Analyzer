@@ -38,7 +38,7 @@ class CarrierDetectionEngine:
 
     def __init__(
         self,
-        enter_threshold_db: float = 10.0,
+        enter_threshold_db: float = 20.0,
         exit_threshold_db: float = 3.0,
         smoothing_window: int | None = None,
         minimum_width_bins: int = 50,
