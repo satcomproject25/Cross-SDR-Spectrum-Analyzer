@@ -8,5 +8,5 @@ __pycache__/
 ./web
 ./SpectrumAnalyzer_build
 
-./data
+./data/logs/2026
 
