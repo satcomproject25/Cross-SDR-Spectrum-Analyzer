@@ -23,17 +23,6 @@
     viewStart: null,
     viewStop: null,
     carriersVisible: true,
-    carriers: [],
-    carrierUnit: "dBFS",
-    selectedCarrier: null,
-    lastCarrierPaint: 0,
-    autoPeakVisible: true,
-    lastPeakBlink: 0,
-    logging: false,
-    logRows: [],
-    logIntervalMs: 1000,
-    logNextDue: 0,
-    logStartedAt: 0,
     activeMarker: 0,
     markerTrace: "amplitude",
     markers: new Map(),
@@ -326,8 +315,6 @@
       clearWaterfall();
     }
     updateMeasurements(header, traces);
-    updateCarriers(header);
-    sampleAmplitudeLog(header, traces);
     $("emptyState").hidden = true;
   }
 
@@ -363,7 +350,6 @@
     $("channelPower").textContent = `${header.channel_power.toFixed(2)} ${unit}`;
     $("rbwValue").textContent = formatFrequency(header.rbw, 3);
     $("carrierCount").textContent = String((header.carriers || []).length);
-    $("carrierPowerHeader").textContent = `Power (${unit})`;
     $("calibrationStatus").textContent = header.power_calibrated ? "Calibrated dBm" : "Raw dBFS";
     $("calibrationStatus").className = header.power_calibrated ? "good" : "warn";
     $("referenceUnit").textContent = unit;
@@ -444,7 +430,7 @@
     for (const [name, visible] of enabled) {
       if (visible) drawTrace(g, header, traces[name], name, startIndex, stopIndex);
     }
-    drawAutoPeak(g, header, traces[state.markerTrace] || traces.amplitude, startIndex, stopIndex);
+    drawAutoPeak(g, header, traces.amplitude, startIndex, stopIndex);
     drawMarkers(g, header, traces);
   }
 
@@ -485,136 +471,22 @@
     spectrumCtx.restore();
   }
 
-  // ---------------------------------------------------------------- carriers
-  // The detector runs at full frame rate on the server; the DOM table is
-  // repainted at 5 Hz so a 30 fps stream never competes with layout work.
-  const CARRIER_TABLE_INTERVAL_MS = 200;
-
-  function updateCarriers(header) {
-    state.carriers = header.carriers || [];
-    state.carrierUnit = header.unit;
-    if (state.selectedCarrier != null
-      && !state.carriers.some((carrier) => carrier.id === state.selectedCarrier)) {
-      state.selectedCarrier = null;
-    }
-    const now = performance.now();
-    if (now - state.lastCarrierPaint < CARRIER_TABLE_INTERVAL_MS) return;
-    state.lastCarrierPaint = now;
-    paintCarrierTable(header);
-  }
-
-  function paintCarrierTable(header) {
-    const body = $("carrierTable");
-    const carriers = state.carriers;
-    $("carrierActive").textContent = String(carriers.length);
-    const occupancy = carriers.reduce((total, c) => total + (c.occupied_bandwidth || 0), 0);
-    $("carrierOccupancy").textContent = occupancy > 0 ? formatFrequency(occupancy, 3) : "—";
-    if (!carriers.length) {
-      body.innerHTML = '<tr class="placeholder-row"><td colspan="4">No carriers detected</td></tr>';
-      return;
-    }
-    const unit = header.unit;
-    const rows = carriers.map((carrier) => {
-      const centre = (carrier.center_frequency / 1e6).toFixed(4);
-      const obw = (carrier.occupied_bandwidth / 1e3).toFixed(1);
-      const power = Number.isFinite(carrier.power) ? carrier.power.toFixed(2) : "—";
-      const classes = [];
-      if (carrier.id === state.selectedCarrier) classes.push("selected");
-      if (carrier.confidence < 0.5) classes.push("stale");
-      const title = Number.isFinite(carrier.snr) ? ` title="SNR ${carrier.snr.toFixed(1)} dB"` : "";
-      return `<tr class="${classes.join(" ")}" data-carrier="${carrier.id}"${title}>`
-        + `<td class="carrier-id">C${carrier.id}</td>`
-        + `<td>${centre}</td><td>${obw}</td><td>${power === "—" ? power : `${power} ${unit}`}</td></tr>`;
-    });
-    body.innerHTML = rows.join("");
-    body.querySelectorAll("tr[data-carrier]").forEach((row) => {
-      row.addEventListener("click", () => selectCarrier(Number(row.dataset.carrier)));
-    });
-  }
-
-  function selectCarrier(id) {
-    const carrier = state.carriers.find((item) => item.id === id);
-    if (!carrier || !state.latestFrame) return;
-    state.selectedCarrier = state.selectedCarrier === id ? null : id;
-    if (state.selectedCarrier != null) {
-      // Frame the carrier with one occupied bandwidth of context either side.
-      const margin = Math.max(carrier.occupied_bandwidth, state.latestFrame.header.rbw * 20);
-      const { header } = state.latestFrame;
-      const low = header.frequency_start;
-      const high = header.frequency_start + header.frequency_step * (header.bins - 1);
-      state.viewStart = Math.max(low, carrier.center_frequency - carrier.occupied_bandwidth / 2 - margin);
-      state.viewStop = Math.min(high, carrier.center_frequency + carrier.occupied_bandwidth / 2 + margin);
-      clearWaterfall();
-    }
-    paintCarrierTable(state.latestFrame.header);
-  }
-
-  function exportCarrierCsv() {
-    if (!state.carriers.length) return toast("No carriers are currently detected", "error");
-    const header = state.latestFrame.header;
-    const calibrated = header.power_calibrated && Number.isFinite(header.power_offset_db);
-    const unit = calibrated ? "dbm" : "dbfs";
-    const columns = [
-      "timestamp_utc", "carrier_id", "center_frequency_hz", "occupied_bandwidth_hz",
-      `band_power_${unit}`, `peak_power_${unit}`, `noise_floor_${unit}`,
-      "snr_db", "left_bin", "right_bin", "confidence", "age_frames",
-    ];
-    const stamp = new Date(header.timestamp * 1000).toISOString();
-    const cell = (value) => (Number.isFinite(value) ? value : "");
-    const lines = [columns.join(",")];
-    for (const carrier of state.carriers) {
-      lines.push([
-        stamp, carrier.id, carrier.center_frequency, carrier.occupied_bandwidth,
-        cell(carrier.power), cell(carrier.peak_power), cell(carrier.noise_floor),
-        cell(carrier.snr), carrier.left, carrier.right, carrier.confidence, carrier.age,
-      ].join(","));
-    }
-    downloadBlob(new Blob([lines.join("\n")], { type: "text/csv" }), `carriers-${Date.now()}.csv`);
-  }
-
   function drawCarriers(g, header) {
     spectrumCtx.save();
-    spectrumCtx.textBaseline = "top";
     for (const carrier of header.carriers || []) {
       const leftFreq = header.frequency_start + carrier.left * header.frequency_step;
       const rightFreq = header.frequency_start + carrier.right * header.frequency_step;
       const left = Math.max(g.left, frequencyToX(leftFreq, g));
       const right = Math.min(g.right, frequencyToX(rightFreq, g));
       if (right <= g.left || left >= g.right) continue;
-      const selected = carrier.id === state.selectedCarrier;
-      const alpha = selected ? .26 : .13;
       const gradient = spectrumCtx.createLinearGradient(left, 0, right, 0);
       gradient.addColorStop(0, "rgba(69, 213, 154, .02)");
-      gradient.addColorStop(.5, `rgba(69, 213, 154, ${alpha})`);
+      gradient.addColorStop(.5, "rgba(69, 213, 154, .13)");
       gradient.addColorStop(1, "rgba(69, 213, 154, .02)");
       spectrumCtx.fillStyle = gradient;
       spectrumCtx.fillRect(left, g.top, right - left, g.height);
-      spectrumCtx.strokeStyle = selected ? "rgba(120, 255, 200, .8)" : "rgba(69, 213, 154, .35)";
+      spectrumCtx.strokeStyle = "rgba(69, 213, 154, .35)";
       spectrumCtx.strokeRect(left, g.top, right - left, g.height);
-
-      // Occupied-bandwidth extent marker at the measured centre frequency.
-      const centreX = frequencyToX(carrier.center_frequency, g);
-      if (centreX > g.left && centreX < g.right) {
-        spectrumCtx.setLineDash([3, 3]);
-        spectrumCtx.strokeStyle = "rgba(69, 213, 154, .5)";
-        spectrumCtx.beginPath();
-        spectrumCtx.moveTo(centreX, g.top);
-        spectrumCtx.lineTo(centreX, g.bottom);
-        spectrumCtx.stroke();
-        spectrumCtx.setLineDash([]);
-      }
-
-      if (right - left > 26) {
-        const power = Number.isFinite(carrier.power) ? `  ${carrier.power.toFixed(1)} ${header.unit}` : "";
-        const label = `C${carrier.id}${power}`;
-        spectrumCtx.font = "bold 9px Cascadia Mono, Consolas, monospace";
-        const width = spectrumCtx.measureText(label).width + 8;
-        const boxLeft = Math.min(left + 3, g.right - width);
-        spectrumCtx.fillStyle = "rgba(3, 12, 8, .82)";
-        spectrumCtx.fillRect(boxLeft, g.top + 3, width, 13);
-        spectrumCtx.fillStyle = selected ? "#b6ffd9" : "#45d59a";
-        spectrumCtx.fillText(label, boxLeft + 4, g.top + 5);
-      }
     }
     spectrumCtx.restore();
   }
@@ -657,12 +529,8 @@
   }
 
   function drawAutoPeak(g, header, values, startIndex, stopIndex) {
-    // Mirrors renderer.py _update_auto_peak_marker(): the automatic peak
-    // indicator is bound to whichever trace the marker system is attached to,
-    // so a max-hold peak is never reported against a clear-write trace.
-    if (!values || !values.length || !state.autoPeakVisible) return;
+    if (!values.length) return;
     const index = visiblePeak(values, startIndex, stopIndex);
-    if (!Number.isFinite(values[index])) return;
     const x = frequencyToX(header.frequency_start + index * header.frequency_step, g);
     const y = amplitudeToY(values[index], g);
     spectrumCtx.save();
@@ -794,13 +662,7 @@
     waterfallCtx.fillRect(0, 0, waterfall.clientWidth, waterfall.clientHeight);
   }
 
-  const AUTO_PEAK_BLINK_MS = 700;
-
   function renderLoop(now) {
-    if (now - state.lastPeakBlink >= AUTO_PEAK_BLINK_MS) {
-      state.lastPeakBlink = now;
-      state.autoPeakVisible = !state.autoPeakVisible;
-    }
     drawSpectrum();
     if (state.latestFrame && state.renderedSequence !== state.frameSequence) {
       drawWaterfallRow(state.latestFrame);
@@ -811,7 +673,6 @@
       state.receivedThisSecond = 0;
       state.lastFpsTick = now;
       $("fpsStatus").textContent = `FPS: ${state.fps.toFixed(1)}`;
-      if (state.logging) updateLoggerReadout();
     }
     requestAnimationFrame(renderLoop);
   }
@@ -973,123 +834,6 @@
     $("deltaButton").classList.toggle("active", marker.deltaFrequency != null);
   }
 
-  // ------------------------------------------------------------ amplitude log
-  // Peak amplitude sampled at a fixed wall-clock interval and buffered in the
-  // browser. Sampling is frame-driven: a sample is only taken when a frame
-  // arrives at or after the next due time, so a stalled stream leaves a visible
-  // gap in the timestamps instead of duplicating the last value.
-  const LOG_ROW_LIMIT = 200000;
-
-  function sampleAmplitudeLog(header, traces) {
-    if (!state.logging) return;
-    const now = Date.now();
-    if (now < state.logNextDue) return;
-    // Advance on the grid rather than from `now`, so interval error does not
-    // accumulate over a long session.
-    state.logNextDue += state.logIntervalMs
-      * Math.max(1, Math.ceil((now - state.logNextDue) / state.logIntervalMs));
-
-    const values = traces[state.markerTrace] || traces.amplitude;
-    if (!values || !values.length) return;
-    // Peak is taken across the full frame, not the visible view: zooming the
-    // display must not change what gets logged.
-    let index = -1;
-    for (let i = 0; i < values.length; i += 1) {
-      if (!Number.isFinite(values[i])) continue;
-      if (index < 0 || values[i] > values[index]) index = i;
-    }
-    if (index < 0) return;
-
-    state.logRows.push({
-      time: header.timestamp * 1000,
-      frequency: header.frequency_start + index * header.frequency_step,
-      amplitude: values[index],
-      unit: header.unit,
-      trace: state.markerTrace,
-      center: header.center_frequency,
-      sampleRate: header.sample_rate,
-      rbw: header.rbw,
-      calibrated: Boolean(header.power_calibrated),
-    });
-
-    if (state.logRows.length >= LOG_ROW_LIMIT) {
-      stopLogging();
-      toast(`Logging stopped at the ${LOG_ROW_LIMIT.toLocaleString()} sample buffer limit`, "error");
-    }
-    updateLoggerReadout();
-  }
-
-  function updateLoggerReadout() {
-    const count = state.logRows.length;
-    $("logCount").textContent = count.toLocaleString();
-    $("logExportButton").disabled = count === 0;
-    $("logClearButton").disabled = count === 0 || state.logging;
-    $("logStatus").hidden = !state.logging;
-    $("logStatus").textContent = `REC ${count.toLocaleString()}`;
-    if (state.logging) {
-      const seconds = Math.max(0, (Date.now() - state.logStartedAt) / 1000);
-      const minutes = Math.floor(seconds / 60);
-      $("logElapsed").textContent = minutes
-        ? `${minutes}m ${String(Math.floor(seconds % 60)).padStart(2, "0")}s`
-        : `${seconds.toFixed(0)}s`;
-    }
-    const last = state.logRows[count - 1];
-    if (last) {
-      $("logLast").textContent =
-        `${formatFrequency(last.frequency, 5)} · ${last.amplitude.toFixed(2)} ${last.unit} · ${last.trace}`;
-    }
-  }
-
-  function startLogging() {
-    if (!state.latestFrame) return toast("Start acquisition before logging", "error");
-    state.logIntervalMs = Number($("logIntervalSelect").value);
-    state.logging = true;
-    state.logStartedAt = Date.now();
-    state.logNextDue = state.logStartedAt;
-    $("logIntervalSelect").disabled = true;
-    $("logToggleButton").textContent = "Stop logging";
-    $("logToggleButton").classList.add("recording");
-    document.querySelector(".logger-card").classList.add("recording");
-    updateLoggerReadout();
-    toast(`Logging peak amplitude every ${state.logIntervalMs} ms`);
-  }
-
-  function stopLogging() {
-    if (!state.logging) return;
-    state.logging = false;
-    $("logIntervalSelect").disabled = false;
-    $("logToggleButton").textContent = "Start logging";
-    $("logToggleButton").classList.remove("recording");
-    document.querySelector(".logger-card").classList.remove("recording");
-    updateLoggerReadout();
-  }
-
-  function exportAmplitudeLog() {
-    if (!state.logRows.length) return toast("The amplitude log is empty", "error");
-    const columns = [
-      "timestamp_utc", "elapsed_s", "peak_frequency_hz", "peak_amplitude",
-      "unit", "trace", "calibrated", "center_frequency_hz", "sample_rate_hz", "rbw_hz",
-    ];
-    const origin = state.logRows[0].time;
-    const lines = [columns.join(",")];
-    for (const row of state.logRows) {
-      lines.push([
-        new Date(row.time).toISOString(),
-        ((row.time - origin) / 1000).toFixed(3),
-        row.frequency.toFixed(1),
-        row.amplitude.toFixed(3),
-        row.unit,
-        row.trace,
-        row.calibrated ? 1 : 0,
-        row.center, row.sampleRate, row.rbw.toFixed(3),
-      ].join(","));
-    }
-    downloadBlob(
-      new Blob([lines.join("\n")], { type: "text/csv" }),
-      `amplitude-log-${new Date(origin).toISOString().replace(/[:.]/g, "-")}.csv`,
-    );
-  }
-
   function downloadBlob(blob, filename) {
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -1167,28 +911,6 @@
     $("resetZoomButton").addEventListener("click", resetView);
     $("screenshotButton").addEventListener("click", exportScreenshot);
     $("csvButton").addEventListener("click", exportCsv);
-    $("carrierCsvButton").addEventListener("click", exportCarrierCsv);
-    $("logToggleButton").addEventListener("click", () => {
-      if (state.logging) stopLogging();
-      else startLogging();
-    });
-    $("logExportButton").addEventListener("click", exportAmplitudeLog);
-    $("logClearButton").addEventListener("click", () => {
-      state.logRows = [];
-      $("logElapsed").textContent = "\u2014";
-      $("logLast").textContent = "Logs the peak of the trace selected under Markers.";
-      updateLoggerReadout();
-    });
-    window.addEventListener("beforeunload", (event) => {
-      // The buffer lives only in this tab; a reload would silently discard it.
-      if (state.logging || state.logRows.length) event.preventDefault();
-    });
-    $("carrierZoomOutButton").addEventListener("click", () => {
-      state.selectedCarrier = null;
-      resetView();
-      clearWaterfall();
-      if (state.latestFrame) paintCarrierTable(state.latestFrame.header);
-    });
     $("resetMinButton").addEventListener("click", async () => {
       try {
         await api("/api/traces/min-hold/reset", {
@@ -1211,19 +933,7 @@
       $("deltaButton").classList.toggle("active", Boolean(marker && marker.deltaFrequency != null));
       updateMarkerTable();
     }));
-    $("markerTraceSelect").addEventListener("change", () => {
-      state.markerTrace = $("markerTraceSelect").value;
-      // The desktop forces the selected trace visible so the auto-peak and
-      // markers are never attached to a hidden curve.
-      const checkbox = {
-        amplitude: "traceLive", max_hold: "traceMax",
-        min_hold: "traceMin", average: "traceAverage",
-      }[state.markerTrace];
-      if (checkbox && !$(checkbox).checked) $(checkbox).checked = true;
-      state.autoPeakVisible = true;
-      state.lastPeakBlink = performance.now();
-      updateMarkerTable();
-    });
+    $("markerTraceSelect").addEventListener("change", () => { state.markerTrace = $("markerTraceSelect").value; });
     $("peakMarkerButton").addEventListener("click", placeMarkerAtPeak);
     $("deltaButton").addEventListener("click", toggleDelta);
     $("clearMarkersButton").addEventListener("click", () => {
