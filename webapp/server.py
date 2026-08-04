@@ -62,20 +62,45 @@ def validate_config(request: AcquisitionRequest) -> AcquisitionConfig:
         <= profile["max_frequency_hz"]
     ):
         raise HTTPException(
-            422, "Center frequency is outside the selected device range"
+            422,
+            f"Center frequency {request.center_frequency / 1e6:.6f} MHz is "
+            f"outside the {device_type} range "
+            f"{profile['min_frequency_hz'] / 1e6:.3f}-"
+            f"{profile['max_frequency_hz'] / 1e6:.3f} MHz",
         )
-    allowed_rates = {float(value) * 1e6 for value in profile["sample_rates"]}
-    if request.sample_rate not in allowed_rates:
+    allowed_rates = [float(value) * 1e6 for value in profile["sample_rates"]]
+    # Exact float equality was fragile: a rate that survives a JSON round trip
+    # as 2399999.9999999995 is the same 2.4 MS/s the profile advertises.
+    if not any(
+        abs(request.sample_rate - rate) <= max(1.0, rate * 1e-9)
+        for rate in allowed_rates
+    ):
         raise HTTPException(
-            422, "Sample rate is not in the selected device profile"
+            422,
+            f"Sample rate {request.sample_rate / 1e6:.6f} MS/s is not offered "
+            f"by {device_type}; allowed: "
+            + ", ".join(f"{rate / 1e6:g}" for rate in allowed_rates),
         )
     maximum_span = min(profile["max_span_hz"], request.sample_rate)
     if not (100e3 <= request.span <= maximum_span):
-        raise HTTPException(422, "Span is outside the selected device profile")
+        raise HTTPException(
+            422,
+            f"Span {request.span / 1e6:.6f} MHz is outside the permitted "
+            f"0.100-{maximum_span / 1e6:.3f} MHz for {device_type} at this "
+            "sample rate",
+        )
     if not (0 <= request.gain <= profile["max_gain_db"]):
-        raise HTTPException(422, "Gain is outside the selected device profile")
+        raise HTTPException(
+            422,
+            f"Gain {request.gain:g} dB is outside the {device_type} range "
+            f"0-{profile['max_gain_db']:g} dB",
+        )
     if request.fft_size != 4096:
-        raise HTTPException(422, "This release uses a fixed 4096-point FFT")
+        raise HTTPException(
+            422,
+            "This release uses a fixed 4096-point FFT (received "
+            f"{request.fft_size})",
+        )
     return AcquisitionConfig(
         device_type=device_type,
         center_frequency=request.center_frequency,
@@ -304,7 +329,12 @@ def create_app(
 
     @app.get("/")
     async def index():
-        return FileResponse(STATIC_DIR / "index.html")
+        # index.html carries the versioned /static URLs, so it must never be
+        # served from cache: a stale index pins the browser to a stale app.js.
+        return FileResponse(
+            STATIC_DIR / "index.html",
+            headers={"Cache-Control": "no-store, must-revalidate"},
+        )
 
     @app.get("/api/profiles", dependencies=[Depends(authorize)])
     async def profiles():
