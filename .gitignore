@@ -4,9 +4,3 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-
-./web
-./SpectrumAnalyzer_build
-
-./data/logs/2026
-
