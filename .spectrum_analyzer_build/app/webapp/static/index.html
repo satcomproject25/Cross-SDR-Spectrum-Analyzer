@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#050607">
+  <title>RF Spectrum Analyzer</title>
+  <meta name="description" content="Low-latency browser interface for HackRF, USRP, ADALM-Pluto, and the built-in IQ simulator.">
+  <meta property="og:title" content="RF Spectrum Analyzer">
+  <meta property="og:description" content="Live signal intelligence in a low-latency browser console.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="/static/og.png">
+  <link rel="stylesheet" href="/static/styles.css?v=4">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <div>
+          <div class="brand-title">RF SPECTRUM ANALYZER</div>
+          <div class="brand-subtitle">LIVE SIGNAL INTELLIGENCE · WEB CONSOLE</div>
+        </div>
+      </div>
+
+      <div class="device-strip">
+        <label class="compact-field">
+          <span>DEVICE</span>
+          <select id="deviceSelect" aria-label="SDR device"></select>
+        </label>
+        <div id="profileBadge" class="profile-badge">20 MS/s · 20 MHz span</div>
+      </div>
+
+      <div class="session-strip">
+        <div class="session-stat">
+          <span class="status-dot" id="networkDot"></span>
+          <div><small>NETWORK</small><strong id="networkLabel">Connecting</strong></div>
+        </div>
+        <div class="session-stat">
+          <div><small>VIEWERS</small><strong id="viewerCount">1</strong></div>
+        </div>
+        <button id="controlButton" class="button ghost compact" type="button">Take control</button>
+        <button id="runButton" class="button run" type="button">
+          <span class="run-icon" aria-hidden="true"></span>
+          <span id="runLabel">Start acquisition</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside id="setupPanel" class="side-panel setup-panel">
+        <div class="panel-heading">
+          <div><span class="eyebrow">RECEIVER</span><h2>Analyzer setup</h2></div>
+          <button class="icon-button mobile-only" data-collapse="setupPanel" aria-label="Close setup panel">×</button>
+        </div>
+
+        <section class="control-card">
+          <div class="section-title"><span>01</span> Frequency plan</div>
+          <label class="field">
+            <span>Center frequency</span>
+            <div class="input-with-unit">
+              <input id="centerInput" type="number" step="0.001" value="2440" inputmode="decimal">
+              <select id="centerUnit" aria-label="Center frequency unit">
+                <option value="1000000">MHz</option>
+                <option value="1000000000">GHz</option>
+                <option value="1000">kHz</option>
+                <option value="1">Hz</option>
+              </select>
+            </div>
+          </label>
+          <label class="field">
+            <span>Display span</span>
+            <div class="input-with-unit">
+              <input id="spanInput" type="number" step="0.1" value="20" inputmode="decimal">
+              <span class="unit-suffix">MHz</span>
+            </div>
+          </label>
+          <div class="frequency-summary">
+            <div><span>START</span><strong id="startFrequency">2.430 GHz</strong></div>
+            <div><span>STOP</span><strong id="stopFrequency">2.450 GHz</strong></div>
+          </div>
+        </section>
+
+        <section class="control-card">
+          <div class="section-title"><span>02</span> Receiver</div>
+          <label class="field">
+            <span>Sample rate</span>
+            <div class="input-with-unit">
+              <select id="sampleRateSelect" aria-label="Sample rate"></select>
+              <span class="unit-suffix">MS/s</span>
+            </div>
+          </label>
+          <label class="field">
+            <span>Gain <output id="gainOutput">20 dB</output></span>
+            <input id="gainInput" class="range" type="range" min="0" max="62" step="1" value="20">
+          </label>
+          <label class="field">
+            <span>Reference level</span>
+            <div class="input-with-unit">
+              <input id="referenceInput" type="number" step="1" value="0">
+              <span id="referenceUnit" class="unit-suffix">dBm</span>
+            </div>
+          </label>
+          <div id="profileDetail" class="profile-detail">Local IQ simulator · no SDR hardware required</div>
+        </section>
+
+        <section class="control-card actions-card">
+          <div class="section-title"><span>03</span> Capture</div>
+          <div class="action-grid">
+            <button id="screenshotButton" class="button secondary" type="button">Screenshot</button>
+            <button id="csvButton" class="button secondary" type="button">Export CSV</button>
+          </div>
+          <button id="resetZoomButton" class="button ghost full" type="button">Reset spectrum zoom</button>
+        </section>
+
+        <section class="control-card logger-card">
+          <div class="section-title"><span>04</span> Amplitude logger</div>
+          <label class="field">
+            <span>Track frequency</span>
+            <div class="input-with-unit">
+              <input id="watchInput" type="number" step="0.000001" placeholder="950.000000" inputmode="decimal">
+              <select id="watchUnit" aria-label="Tracked frequency unit">
+                <option value="1000000">MHz</option>
+                <option value="1000000000">GHz</option>
+                <option value="1000">kHz</option>
+                <option value="1">Hz</option>
+              </select>
+            </div>
+          </label>
+          <button id="watchAddButton" class="button secondary full" type="button">Add frequency</button>
+          <ul id="watchList" class="watch-list">
+            <li class="watch-empty">Add one or more frequencies to log.</li>
+          </ul>
+          <label class="field">
+            <span>Source trace</span>
+            <select id="watchTrace" aria-label="Logged trace">
+              <option value="average" selected>Average</option>
+              <option value="amplitude">Clear write</option>
+              <option value="max_hold">Max hold</option>
+              <option value="min_hold">Min hold</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Detector</span>
+            <select id="watchDetector" aria-label="Amplitude detector">
+              <option value="0">Nearest bin</option>
+              <option value="5" selected>Peak within ±5 bins</option>
+              <option value="20">Peak within ±20 bins</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Sample interval</span>
+            <select id="logIntervalSelect" aria-label="Logging interval">
+              <option value="100">100 ms</option>
+              <option value="250">250 ms</option>
+              <option value="500">500 ms</option>
+              <option value="1000" selected>1 s</option>
+              <option value="2000">2 s</option>
+              <option value="5000">5 s</option>
+              <option value="30000">30 s</option>
+            </select>
+          </label>
+          <div class="logger-readout">
+            <div><span>SAMPLES</span><strong id="logCount">0</strong></div>
+            <div><span>ELAPSED</span><strong id="logElapsed">—</strong></div>
+          </div>
+          <button id="logToggleButton" class="button secondary full" type="button" disabled>Start logging</button>
+          <div class="action-grid">
+            <button id="logExportButton" class="button secondary" type="button" disabled>Download CSV</button>
+            <button id="logClearButton" class="button ghost" type="button" disabled>Clear log</button>
+          </div>
+          <button id="logPlotButton" class="button ghost full" type="button">Plot log file…</button>
+        </section>
+      </aside>
+
+      <section class="signal-stage">
+        <div class="stage-toolbar">
+          <div class="stage-title">
+            <span class="live-pill"><i></i> LIVE</span>
+            <div><strong id="stageDevice">Awaiting acquisition</strong><span id="frameMeta">4096 FFT · — RBW</span></div>
+          </div>
+          <div class="toolbar-actions">
+            <button class="panel-trigger" data-open="setupPanel" type="button">Setup</button>
+            <button id="carrierToggle" class="tool-toggle active" type="button" aria-pressed="true">Carriers</button>
+            <button class="panel-trigger" data-open="analysisPanel" type="button">Analysis</button>
+          </div>
+        </div>
+
+        <div class="plot-stack">
+          <section class="plot-panel spectrum-panel" aria-label="Live spectrum">
+            <canvas id="spectrumCanvas"></canvas>
+            <div id="emptyState" class="empty-state">
+              <div class="empty-signal" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+              <strong>Spectrum ready</strong>
+              <span>Start the simulator or connect an SDR to begin</span>
+            </div>
+            <div id="plotTooltip" class="plot-tooltip" hidden></div>
+          </section>
+          <div class="plot-divider"><span>WATERFALL HISTORY</span><i></i></div>
+          <section class="plot-panel waterfall-panel" aria-label="Spectrum waterfall">
+            <canvas id="waterfallCanvas"></canvas>
+            <div class="waterfall-scale"><span id="scaleMax">0 dBm</span><span id="scaleMid">−60</span><span id="scaleMin">−120</span></div>
+          </section>
+        </div>
+      </section>
+
+      <aside id="analysisPanel" class="side-panel analysis-panel">
+        <div class="panel-heading">
+          <div><span class="eyebrow">SIGNAL LAB</span><h2>Analysis</h2></div>
+          <button class="icon-button mobile-only" data-collapse="analysisPanel" aria-label="Close analysis panel">×</button>
+        </div>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="measure" type="button">Measure</button>
+          <button class="tab" data-tab="carriers" type="button">Carriers</button>
+          <button class="tab" data-tab="traces" type="button">Traces</button>
+          <button class="tab" data-tab="markers" type="button">Markers</button>
+        </div>
+
+        <div id="tab-measure" class="tab-panel active">
+          <section class="hero-measurement">
+            <span>PEAK AMPLITUDE</span>
+            <strong id="peakAmplitude">—</strong>
+            <small id="peakFrequency">— MHz</small>
+          </section>
+          <section class="metric-list">
+            <div><span>Noise floor</span><strong id="noiseFloor">—</strong></div>
+            <div><span>Occupied bandwidth</span><strong id="occupiedBandwidth">—</strong></div>
+            <div><span>Channel power</span><strong id="channelPower">—</strong></div>
+            <div><span>Resolution bandwidth</span><strong id="rbwValue">—</strong></div>
+          </section>
+          <section class="signal-health">
+            <div class="section-title"><span>RF</span> Signal occupancy</div>
+            <div class="health-row"><span>Detected carriers</span><strong id="carrierCount">0</strong></div>
+            <div class="health-row"><span>Calibration</span><strong id="calibrationStatus">Waiting</strong></div>
+          </section>
+        </div>
+
+        <div id="tab-carriers" class="tab-panel">
+          <section class="carrier-summary">
+            <div><span>ACTIVE</span><strong id="carrierActive">0</strong></div>
+            <div><span>TOTAL OCCUPANCY</span><strong id="carrierOccupancy">—</strong></div>
+          </section>
+          <div class="carrier-table-wrap">
+            <table class="marker-table carrier-table">
+              <thead>
+                <tr><th>ID</th><th>Centre (MHz)</th><th>OBW (kHz)</th><th id="carrierPowerHeader">Power (dBFS)</th></tr>
+              </thead>
+              <tbody id="carrierTable">
+                <tr class="placeholder-row"><td colspan="4">No carriers detected</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="carrier-hint">Select a row to zoom the spectrum onto that carrier.</p>
+          <button id="carrierCsvButton" class="button secondary full" type="button">Export carrier table CSV</button>
+          <button id="carrierZoomOutButton" class="button ghost full" type="button">Reset spectrum zoom</button>
+        </div>
+
+        <div id="tab-traces" class="tab-panel">
+          <div class="trace-list">
+            <label class="trace-row cyan">
+              <input id="traceLive" type="checkbox" checked>
+              <i></i><span><strong>Clear write</strong><small>Latest FFT frame</small></span>
+            </label>
+            <label class="trace-row violet">
+              <input id="traceMax" type="checkbox">
+              <i></i><span><strong>Max hold</strong><small>Highest value per bin</small></span>
+            </label>
+            <label class="trace-row blue">
+              <input id="traceMin" type="checkbox">
+              <i></i><span><strong>Min hold</strong><small>Lowest valid value per bin</small></span>
+            </label>
+            <label class="trace-row yellow">
+              <input id="traceAverage" type="checkbox">
+              <i></i><span><strong>Average</strong><small>Linear-power running average</small></span>
+            </label>
+          </div>
+          <button id="resetMinButton" class="button secondary full" type="button">Reset min hold</button>
+        </div>
+
+        <div id="tab-markers" class="tab-panel">
+          <label class="field">
+            <span>Attach markers to</span>
+            <select id="markerTraceSelect">
+              <option value="amplitude">Clear write</option>
+              <option value="max_hold">Max hold</option>
+              <option value="min_hold">Min hold</option>
+              <option value="average">Average</option>
+            </select>
+          </label>
+          <div class="marker-selector" aria-label="Active marker">
+            <button class="marker-choice active" data-marker="0" type="button">None</button>
+            <button class="marker-choice" data-marker="1" type="button">M1</button>
+            <button class="marker-choice" data-marker="2" type="button">M2</button>
+            <button class="marker-choice" data-marker="3" type="button">M3</button>
+            <button class="marker-choice" data-marker="4" type="button">M4</button>
+            <button class="marker-choice" data-marker="5" type="button">M5</button>
+            <button class="marker-choice" data-marker="6" type="button">M6</button>
+          </div>
+          <div class="action-grid marker-actions">
+            <button id="peakMarkerButton" class="button secondary" type="button">Peak search</button>
+            <button id="deltaButton" class="button secondary" type="button">Delta</button>
+          </div>
+          <button id="clearMarkersButton" class="button ghost full" type="button">Clear all markers</button>
+          <div class="marker-table-wrap">
+            <table class="marker-table">
+              <thead><tr><th>ID</th><th>Frequency</th><th>Amplitude</th><th>ΔF</th></tr></thead>
+              <tbody id="markerTable"><tr class="placeholder-row"><td colspan="4">Select a marker, then click the spectrum</td></tr></tbody>
+            </table>
+          </div>
+          <div id="deltaReadout" class="delta-readout" hidden></div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <div class="status-primary"><span id="deviceDot" class="status-dot"></span><strong id="deviceStatus">Device: Idle</strong></div>
+      <div class="status-metrics">
+        <span id="peakStatus">Peak: —</span>
+        <span id="fpsStatus">FPS: —</span>
+        <span id="fftStatus">FFT: 4096</span>
+        <span id="latencyStatus">Stream: —</span>
+        <span id="logStatus" hidden>REC 0</span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="tokenDialog" class="modal" hidden>
+    <form id="tokenForm" class="modal-card">
+      <span class="eyebrow">PROTECTED ANALYZER</span>
+      <h1>Campus access token</h1>
+      <p>This analyzer requires the token supplied by the SDR host operator.</p>
+      <label class="field"><span>Access token</span><input id="tokenInput" type="password" autocomplete="current-password"></label>
+      <div id="tokenError" class="form-error" hidden>That token was not accepted.</div>
+      <button class="button run full" type="submit">Connect securely</button>
+    </form>
+  </div>
+
+  <div id="logPlotModal" class="modal" hidden>
+    <div class="modal-card log-plot-card">
+      <div class="log-plot-head">
+        <div>
+          <span class="eyebrow">AMPLITUDE LOG</span>
+          <h1 id="logPlotTitle">Session buffer</h1>
+        </div>
+        <button id="logPlotClose" class="icon-button" type="button" aria-label="Close plot">×</button>
+      </div>
+      <div class="log-plot-toolbar">
+        <button id="logPlotCurrent" class="button secondary compact" type="button">Plot current session</button>
+        <label class="file-button button ghost compact">
+          Open CSV…
+          <input id="logFileInput" type="file" accept=".csv,text/csv" hidden>
+        </label>
+        <span id="logPlotMeta" class="log-plot-meta">—</span>
+      </div>
+      <div class="log-plot-stage">
+        <canvas id="logPlotCanvas"></canvas>
+        <div id="logPlotEmpty" class="log-plot-empty">Open a logged CSV file, or plot the current session buffer.</div>
+        <div id="logPlotTooltip" class="plot-tooltip" hidden></div>
+      </div>
+      <div id="logPlotLegend" class="log-plot-legend"></div>
+    </div>
+  </div>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+  <script src="/static/app.js?v=4" defer></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "devices": {
+    "HACKRF": {
+      "default": {
+        "power_offset_db": null
+      },
+      "serials": {
+        "your_hackrf_serial_here": {
+          "frequency_offset_table": [
+            {"freq_hz": 100000000, "offset_hz": 2100},
+            {"freq_hz": 500000000, "offset_hz": 9800},
+            {"freq_hz": 900000000, "offset_hz": 22000},
+            {"freq_hz": 1500000000, "offset_hz": 31000},
+            {"freq_hz": 2000000000, "offset_hz": 44500},
+            {"freq_hz": 2400000000, "offset_hz": 47000}
+          ],
+          "power_offset_db": null
+        }
+      }
+    }
+  }
+}
