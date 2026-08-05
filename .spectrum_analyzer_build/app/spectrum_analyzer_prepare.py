@@ -426,6 +426,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$ScriptDir  = $ScriptDir.TrimEnd("\")
 $AppName    = "spectrum_analyzer"
 $EnvName    = "spectrum_analyzer"
 $CondaDir   = "$env:USERPROFILE\miniforge3"
@@ -537,6 +538,8 @@ $LauncherBat = Join-Path $InstallDir "run_app.bat"
 set "CONDA_PREFIX=$EnvDir"
 set "PATH=$EnvDir;$EnvDir\Scripts;$EnvDir\Library\bin;%PATH%"
 set "QT_QPA_PLATFORM_PLUGIN_PATH=$EnvDir\Library\plugins\platforms"
+set "QT_QPA_FONTDIR=%WINDIR%\Fonts"
+set "QT_LOGGING_RULES=*.debug=false;qt.qpa.fonts=false"
 cd /d "$InstallDir"
 "$EnvDir\python.exe" run.py %*
 "@ | Set-Content -Path $LauncherBat -Encoding ASCII
@@ -555,7 +558,10 @@ color 0A
 set "CONDA_PREFIX=$EnvDir"
 set "PATH=$EnvDir;$EnvDir\Scripts;$EnvDir\Library\bin;%PATH%"
 set "QT_QPA_PLATFORM=offscreen"
+set "QT_QPA_FONTDIR=%WINDIR%\Fonts"
+set "QT_LOGGING_RULES=*.debug=false;qt.qpa.fonts=false;qt.qpa.plugin=false"
 cd /d "$InstallDir"
+
 echo.
 echo  ================================================
 echo   Spectrum Analyzer  --  Web Interface
@@ -565,7 +571,18 @@ echo   Browser will open automatically when ready.
 echo   Close this window to stop the server.
 echo  ================================================
 echo.
-powershell -NoProfile -WindowStyle Hidden -Command "for(`$i=0;`$i -lt 60;`$i++){try{Invoke-WebRequest http://localhost:8000 -TimeoutSec 1 -UseBasicParsing -ErrorAction Stop|Out-Null;Start-Process 'http://localhost:8000';break}catch{Start-Sleep 1}}"
+
+:: Step 1 -- Launch browser opener as a detached background process.
+::   Uses ping as a 5-second delay (no timeout.exe needed), then polls
+::   localhost:8000 once per second until the server responds.
+::   start /min runs it in a minimized window that closes when done.
+start "" /min cmd /c "ping -n 6 127.0.0.1 >nul & powershell -NoProfile -Command ""for(`$i=0;`$i -lt 120;`$i++){try{(New-Object Net.WebClient).DownloadString('http://localhost:8000')|Out-Null;Start-Process 'http://localhost:8000';break}catch{Start-Sleep 1}}"" "
+
+:: Step 2 -- Start server in foreground.
+::   Server logs appear in this window.
+::   Closing this window stops the server.
+echo  Starting server...
+echo.
 "$EnvDir\python.exe" run.py --headless
 "@ | Set-Content -Path $WebLauncherBat -Encoding ASCII
 
@@ -631,17 +648,47 @@ $Shortcut3.WindowStyle      = 1
 $Shortcut3.Save()
 Write-OK "Start Menu shortcuts created (GUI + Web Interface)"
 
-# -- [7/7] Hardware driver selection ─────────────────────────────────────────
-Write-Info "[7/7] Hardware driver installation..."
-Write-Host ""
-Write-Host "  The app is installed. Now select which hardware driver to install." -ForegroundColor White
-Write-Host "  You can skip now and run install_drivers.bat any time later." -ForegroundColor Gray
+# -- [7/7] Hardware Driver Installation
+function Install-Driver-Inline($folder, $name, $url) {
+    $p = Join-Path $ScriptDir $folder
+    Write-Info "  Installing: $name"
+    if (-not (Test-Path $p)) { Write-Warn "  Not found in bundle. Install manually: $url"; return }
+    $infs = Get-ChildItem -Path $p -Filter "*.inf" -Recurse
+    if ($infs.Count -eq 0) { Write-Warn "  No .inf files found. Install manually: $url"; return }
+    foreach ($inf in $infs) {
+        Write-Info "  -> $($inf.Name)"
+        & pnputil /add-driver $inf.FullName /install 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-OK "     Installed OK" }
+        else { Write-Warn "     pnputil exit $LASTEXITCODE (may already be installed)" }
+    }
+    Write-OK "$name driver ready -- plug in device anytime"
+}
 
-$driversScript = Join-Path $ScriptDir "install_drivers.ps1"
-if (Test-Path $driversScript) {
-    & $driversScript -BundleDir $ScriptDir
-} else {
-    Write-Warn "install_drivers.ps1 not found -- run install_drivers.bat separately"
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Hardware Driver Installation" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Select hardware driver to install:" -ForegroundColor White
+Write-Host "    [1]  USRP   (X300 / B200 / B210)" -ForegroundColor Cyan
+Write-Host "    [2]  PlutoSDR (ADALM-PLUTO)" -ForegroundColor Cyan
+Write-Host "    [3]  HackRF One" -ForegroundColor Cyan
+Write-Host "    [4]  All of the above" -ForegroundColor Cyan
+Write-Host "    [S]  Skip (run install_drivers.bat any time later)" -ForegroundColor Gray
+Write-Host ""
+$drvChoice = (Read-Host "  Enter choice (1 / 2 / 3 / 4 / S)").Trim().ToUpper()
+Write-Host ""
+switch ($drvChoice) {
+    "1" { Install-Driver-Inline "drivers\uhd"      "USRP (UHD)"  "https://files.ettus.com/manual/page_transport.html" }
+    "2" { Install-Driver-Inline "drivers\plutosdr" "PlutoSDR"    "https://wiki.analog.com/university/tools/pluto/drivers/windows" }
+    "3" { Install-Driver-Inline "drivers\hackrf"   "HackRF One"  "https://zadig.akeo.ie" }
+    "4" {
+             Install-Driver-Inline "drivers\uhd"      "USRP (UHD)"  "https://files.ettus.com/manual/page_transport.html"
+             Install-Driver-Inline "drivers\plutosdr" "PlutoSDR"    "https://wiki.analog.com/university/tools/pluto/drivers/windows"
+             Install-Driver-Inline "drivers\hackrf"   "HackRF One"  "https://zadig.akeo.ie"
+    }
+    "S"     { Write-Host "  Skipped. Run install_drivers.bat any time." -ForegroundColor Yellow }
+    default { Write-Host "  Invalid choice. Run install_drivers.bat to retry." -ForegroundColor Yellow }
 }
 
 # -- Summary -------------------------------------------------------------------
@@ -674,6 +721,8 @@ DRIVER_MENU_PS1 = r'''
 param(
     [string]$BundleDir = $PSScriptRoot
 )
+# Normalise: remove any trailing backslash that batch files may append
+$BundleDir = $BundleDir.TrimEnd("\")
 
 function Write-Section($msg) {
     Write-Host "`n$('=' * 60)" -ForegroundColor Cyan
@@ -906,6 +955,302 @@ Write-Host ""
 pause
 '''
 
+CHECK_PS1 = '''
+# =============================================================================
+#  Spectrum Analyzer -- Dependency Checker
+#  Verifies every component needed to run the app is correctly installed.
+#  Run this any time to diagnose problems.
+# =============================================================================
+#Requires -Version 5.0
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "SilentlyContinue"
+
+$AppName  = "spectrum_analyzer"
+$EnvName  = "spectrum_analyzer"
+$CondaDir = "$env:USERPROFILE\\miniforge3"
+$EnvDir   = "$CondaDir\\envs\\$EnvName"
+$PyExe    = "$EnvDir\\python.exe"
+$InstDir  = "$env:USERPROFILE\\$AppName"
+
+function Write-Section($msg) {
+    Write-Host ""
+    Write-Host ("=" * 60) -ForegroundColor Cyan
+    Write-Host "  $msg" -ForegroundColor Cyan
+    Write-Host ("=" * 60) -ForegroundColor Cyan
+}
+function Pass($msg)  { Write-Host "  [PASS]  $msg" -ForegroundColor Green  }
+function Fail($msg)  { Write-Host "  [FAIL]  $msg" -ForegroundColor Red    }
+function Warn($msg)  { Write-Host "  [WARN]  $msg" -ForegroundColor Yellow }
+function Info($msg)  { Write-Host "  [INFO]  $msg" -ForegroundColor Gray   }
+
+$failures = 0
+
+# -- 1. Core installation paths -------------------------------------------
+Write-Section "1. Installation Paths"
+
+if (Test-Path $CondaDir) { Pass "Miniforge:          $CondaDir" }
+else { Fail "Miniforge NOT found: $CondaDir"; $failures++ }
+
+if (Test-Path $EnvDir)   { Pass "Conda env:          $EnvDir" }
+else { Fail "Conda env NOT found: $EnvDir"; $failures++ }
+
+if (Test-Path $PyExe)    { Pass "Python executable:  $PyExe" }
+else { Fail "Python NOT found:   $PyExe"; $failures++ }
+
+if (Test-Path "$InstDir\\run.py") { Pass "App source:         $InstDir\run.py" }
+else { Fail "App source NOT found: $InstDir\run.py"; $failures++ }
+
+# -- 2. Python packages ---------------------------------------------------
+Write-Section "2. Python Packages"
+
+if (-not (Test-Path $PyExe)) {
+    Fail "Python not found -- skipping package checks"
+} else {
+    $packages = @(
+        @{ name="numpy";      import="numpy"        },
+        @{ name="scipy";      import="scipy"        },
+        @{ name="PyQt6";      import="PyQt6.QtCore" },
+        @{ name="pyqtgraph";  import="pyqtgraph"    },
+        @{ name="SoapySDR";   import="SoapySDR"     },
+        @{ name="matplotlib"; import="matplotlib"   },
+        @{ name="fastapi";    import="fastapi"       },
+        @{ name="uvicorn";    import="uvicorn"       },
+        @{ name="websockets"; import="websockets"    }
+    )
+    foreach ($pkg in $packages) {
+        $ver = & $PyExe -c "import $($pkg.import); print(getattr($($pkg.import).split('.')[0] | ForEach-Object { __import__($_, fromlist=['__version__']) }, '__version__', 'ok'))" 2>$null
+        $code = "import importlib,sys; m=importlib.import_module('$($pkg.import)'); print(getattr(m,'__version__','installed'))"
+        $ver = & $PyExe -c $code 2>$null
+        if ($LASTEXITCODE -eq 0 -and $ver) {
+            Pass "$($pkg.name.PadRight(14)) $ver"
+        } else {
+            Fail "$($pkg.name.PadRight(14)) NOT INSTALLED"
+            $failures++
+        }
+    }
+}
+
+# -- 3. SDR Hardware detection --------------------------------------------
+Write-Section "3. SDR Hardware"
+
+$soapyUtil = "$EnvDir\\Library\\bin\\SoapySDRUtil.exe"
+if (-not (Test-Path $soapyUtil)) { $soapyUtil = "SoapySDRUtil" }
+
+$hackrfInfo = "$EnvDir\\Library\\bin\\hackrf_info.exe"
+if (-not (Test-Path $hackrfInfo)) { $hackrfInfo = "hackrf_info" }
+
+# SoapySDR device scan
+$soapyOut = & $soapyUtil --find 2>&1
+if ($soapyOut -match "driver=hackrf") {
+    Pass "HackRF One          detected via SoapySDR"
+} else {
+    Warn "HackRF One          not detected (not connected or driver missing)"
+}
+
+if ($soapyOut -match "driver=uhd") {
+    Pass "USRP (UHD)          detected via SoapySDR"
+} else {
+    Warn "USRP (UHD)          not detected (check Ethernet connection)"
+}
+
+if ($soapyOut -match "driver=plutosdr") {
+    Pass "PlutoSDR            detected via SoapySDR"
+} else {
+    Warn "PlutoSDR            not detected (not connected or driver missing)"
+}
+
+# hackrf_info direct check
+$hrf = & $hackrfInfo 2>&1
+if ($hrf -match "Found HackRF") {
+    Pass "hackrf_info         HackRF enumerated"
+    Info "  $($hrf | Select-String 'Serial' | Select-Object -First 1)"
+} else {
+    Warn "hackrf_info         no device found (check USB cable)"
+}
+
+# -- 4. Shortcuts and launchers -------------------------------------------
+Write-Section "4. Shortcuts and Launchers"
+
+$desktop = [Environment]::GetFolderPath("Desktop")
+$startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "Spectrum Analyzer"
+
+if (Test-Path "$desktop\\Spectrum Analyzer.lnk")        { Pass "Desktop shortcut (GUI)" }
+else { Warn "Desktop shortcut (GUI) missing -- run install.bat to fix" }
+
+if (Test-Path "$desktop\\Spectrum Analyzer (Web).lnk")  { Pass "Desktop shortcut (Web)" }
+else { Warn "Desktop shortcut (Web) missing -- run install.bat to fix" }
+
+if (Test-Path "$InstDir\\run_app.bat")  { Pass "GUI launcher:       run_app.bat" }
+else { Fail "GUI launcher missing: run_app.bat"; $failures++ }
+
+if (Test-Path "$InstDir\\run_web.bat")  { Pass "Web launcher:       run_web.bat" }
+else { Fail "Web launcher missing: run_web.bat"; $failures++ }
+
+# -- 5. Port availability -------------------------------------------------
+Write-Section "5. Port Check"
+
+$portInUse = netstat -an 2>$null | Select-String ":8000.*LISTENING"
+if ($portInUse) {
+    Warn "Port 8000 is already in use -- web server may fail to start"
+    Warn "Stop the existing process or change the port in run.py"
+} else {
+    Pass "Port 8000              available for web server"
+}
+
+# -- 6. Windows tar availability ------------------------------------------
+Write-Section "6. System Tools"
+
+$tarExe = "$env:SystemRoot\\System32\\tar.exe"
+if (Test-Path $tarExe) { Pass "tar.exe                present (Windows 10 1803+)" }
+else { Fail "tar.exe                NOT found -- need Windows 10 build 1803 or newer"; $failures++ }
+
+$psVer = $PSVersionTable.PSVersion
+if ($psVer.Major -ge 5) { Pass "PowerShell             v$psVer" }
+else { Fail "PowerShell             v$psVer -- need 5.0 or newer"; $failures++ }
+
+# -- Summary --------------------------------------------------------------
+Write-Host ""
+Write-Host ("=" * 60) -ForegroundColor Cyan
+if ($failures -eq 0) {
+    Write-Host "  ALL CHECKS PASSED -- Spectrum Analyzer is ready to run" -ForegroundColor Green
+} else {
+    Write-Host "  $failures CHECK(S) FAILED -- see [FAIL] items above" -ForegroundColor Red
+    Write-Host "  Run install.bat to fix missing components" -ForegroundColor Yellow
+}
+Write-Host ("=" * 60) -ForegroundColor Cyan
+Write-Host ""
+pause
+'''
+
+CHECK_BAT = '''@echo off
+:: Spectrum Analyzer -- Dependency Checker
+:: Run this any time to verify all components are correctly installed.
+echo.
+echo  Spectrum Analyzer -- Dependency Check
+echo  ========================================
+echo  Checking all installed components...
+echo.
+set "SA_BUNDLE=%~dp0"
+if "%SA_BUNDLE:~-1%"=="\" set "SA_BUNDLE=%SA_BUNDLE:~0,-1%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0check.ps1"
+'''
+
+CHECK_SH  = '''#!/usr/bin/env bash
+# =============================================================================
+#  Spectrum Analyzer -- Linux Dependency Checker
+#  Verifies every component needed to run the app is correctly installed.
+# =============================================================================
+set -uo pipefail
+
+APP_NAME="spectrum_analyzer"
+CONDA_DIR="${HOME}/miniforge3"
+ENV_DIR="${CONDA_DIR}/envs/${APP_NAME}"
+PYTHON="${ENV_DIR}/bin/python"
+INSTALL_DIR="${HOME}/${APP_NAME}"
+
+G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; B='\033[0;34m'
+BOLD='\033[1m'; C='\033[0;36m'; NC='\033[0m'
+PASS() { echo -e "  ${G}[PASS]${NC}  $*"; }
+FAIL() { echo -e "  ${R}[FAIL]${NC}  $*"; ((FAILURES++)); }
+WARN() { echo -e "  ${Y}[WARN]${NC}  $*"; }
+INFO() { echo -e "  ${B}[INFO]${NC}  $*"; }
+SECTION() { echo -e "\n${BOLD}${C}== $* ==${NC}"; }
+FAILURES=0
+
+# -- 1. Installation paths ------------------------------------------------
+SECTION "1. Installation Paths"
+
+[[ -d "$CONDA_DIR"        ]] && PASS "Miniforge:    $CONDA_DIR"         || FAIL "Miniforge NOT found: $CONDA_DIR"
+[[ -d "$ENV_DIR"          ]] && PASS "Conda env:    $ENV_DIR"           || FAIL "Conda env NOT found: $ENV_DIR"
+[[ -f "$PYTHON"           ]] && PASS "Python:       $PYTHON"            || FAIL "Python NOT found: $PYTHON"
+[[ -f "$INSTALL_DIR/run.py" ]] && PASS "App source: $INSTALL_DIR/run.py" || FAIL "App NOT found: $INSTALL_DIR/run.py"
+
+# -- 2. Python packages ---------------------------------------------------
+SECTION "2. Python Packages"
+
+if [[ ! -f "$PYTHON" ]]; then
+    FAIL "Python not found -- skipping package checks"
+else
+    check_pkg() {
+        local label="$1" mod="$2"
+        local ver
+        ver=$("$PYTHON" -c "import importlib,sys; m=importlib.import_module('$mod'); print(getattr(m,'__version__','installed'))" 2>/dev/null)
+        if [[ $? -eq 0 && -n "$ver" ]]; then
+            PASS "$(printf '%-16s' "$label") $ver"
+        else
+            FAIL "$(printf '%-16s' "$label") NOT INSTALLED"
+        fi
+    }
+    check_pkg "numpy"       "numpy"
+    check_pkg "scipy"       "scipy"
+    check_pkg "PyQt6"       "PyQt6.QtCore"
+    check_pkg "pyqtgraph"   "pyqtgraph"
+    check_pkg "SoapySDR"    "SoapySDR"
+    check_pkg "matplotlib"  "matplotlib"
+    check_pkg "fastapi"     "fastapi"
+    check_pkg "uvicorn"     "uvicorn"
+    check_pkg "websockets"  "websockets"
+fi
+
+# -- 3. SDR hardware ------------------------------------------------------
+SECTION "3. SDR Hardware"
+
+SOAPY="${ENV_DIR}/bin/SoapySDRUtil"
+HACKRF="${ENV_DIR}/bin/hackrf_info"
+
+if [[ -x "$SOAPY" ]]; then
+    SOAPY_OUT=$("$SOAPY" --find 2>/dev/null || true)
+    echo "$SOAPY_OUT" | grep -q "driver=hackrf"    && PASS "HackRF One      detected" || WARN "HackRF One      not detected (not connected?)"
+    echo "$SOAPY_OUT" | grep -q "driver=uhd"       && PASS "USRP (UHD)      detected" || WARN "USRP (UHD)      not detected (check Ethernet)"
+    echo "$SOAPY_OUT" | grep -q "driver=plutosdr"  && PASS "PlutoSDR        detected" || WARN "PlutoSDR        not detected (not connected?)"
+else
+    WARN "SoapySDRUtil not found -- skipping hardware scan"
+fi
+
+if [[ -x "$HACKRF" ]]; then
+    HRF_OUT=$("$HACKRF" 2>/dev/null || true)
+    echo "$HRF_OUT" | grep -q "Found HackRF" && PASS "hackrf_info     HackRF enumerated" || WARN "hackrf_info     no device found (check USB)"
+fi
+
+# -- 4. Shortcuts and launchers -------------------------------------------
+SECTION "4. Shortcuts and Launchers"
+
+[[ -f "${HOME}/.local/bin/${APP_NAME}"                                 ]] && PASS "Terminal command:  spectrum_analyzer"         || WARN "Terminal command missing -- run install.sh"
+[[ -f "${HOME}/.local/share/applications/${APP_NAME}.desktop"          ]] && PASS "App menu (GUI):    .desktop entry present"    || WARN "App menu (GUI) missing"
+[[ -f "${HOME}/.local/share/applications/${APP_NAME}_web.desktop"      ]] && PASS "App menu (Web):    .desktop entry present"    || WARN "App menu (Web) missing"
+[[ -f "${INSTALL_DIR}/run_app.sh"                                       ]] && PASS "GUI launcher:      run_app.sh"                || FAIL "GUI launcher missing"
+[[ -f "${INSTALL_DIR}/run_web.sh"                                       ]] && PASS "Web launcher:      run_web.sh"                || FAIL "Web launcher missing"
+
+# -- 5. udev rules --------------------------------------------------------
+SECTION "5. HackRF udev Rules"
+
+RULES="/etc/udev/rules.d/53-hackrf.rules"
+[[ -f "$RULES" ]] && PASS "udev rules:        $RULES" || WARN "udev rules missing -- HackRF may need sudo. Run install.sh to fix"
+
+groups "$USER" | grep -q "plugdev" && PASS "plugdev group:     $USER is member" || WARN "plugdev group:     $USER not in plugdev -- re-plug HackRF after running install.sh"
+
+# -- 6. Port availability -------------------------------------------------
+SECTION "6. Port Check"
+
+if ss -tlnp 2>/dev/null | grep -q ":8000" || netstat -tlnp 2>/dev/null | grep -q ":8000"; then
+    WARN "Port 8000 is already in use -- web server may fail to start"
+else
+    PASS "Port 8000:         available for web server"
+fi
+
+# -- Summary --------------------------------------------------------------
+echo ""
+echo -e "${BOLD}${C}=================================================${NC}"
+if [[ $FAILURES -eq 0 ]]; then
+    echo -e "  ${G}ALL CHECKS PASSED -- Spectrum Analyzer is ready${NC}"
+else
+    echo -e "  ${R}$FAILURES CHECK(S) FAILED -- see [FAIL] items above${NC}"
+    echo -e "  ${Y}Run install.sh to fix missing components${NC}"
+fi
+echo -e "${BOLD}${C}=================================================${NC}"
+echo ""
+'''
+
 UNINSTALL_BAT = r'''@echo off
 :: Spectrum Analyzer -- Uninstaller launcher
 :: Double-click to uninstall Spectrum Analyzer.
@@ -1031,7 +1376,9 @@ echo  ===============================================
 echo  You can install drivers for USRP, PlutoSDR, or HackRF.
 echo  Re-run this file any time to install additional hardware.
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_drivers.ps1" -BundleDir "%~dp0"
+set "SA_BUNDLE=%~dp0"
+if "%SA_BUNDLE:~-1%"=="\" set "SA_BUNDLE=%SA_BUNDLE:~0,-1%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_drivers.ps1" -BundleDir "%SA_BUNDLE%"
 echo.
 pause
 '''
@@ -1536,12 +1883,15 @@ def cmd_prepare(args) -> None:
         # Installer scripts
         _add_str(_ascii(INSTALL_SH),    "install.sh",          mode=0o755)
         _add_str(_ascii(UNINSTALL_SH),  "uninstall.sh",        mode=0o755)
+        _add_str(_ascii(CHECK_SH),      "check.sh",            mode=0o755)
         _add_str(_UTF8_BOM + _ascii(INSTALL_PS1),          "install.ps1",         mode=0o644)
         _add_str(_UTF8_BOM + _ascii(DRIVER_MENU_PS1),      "install_drivers.ps1", mode=0o644)
         _add_str(_UTF8_BOM + _ascii(UNINSTALL_PS1),        "uninstall.ps1",       mode=0o644)
         _add_str(_ascii(INSTALL_BAT),                       "install.bat",         mode=0o644)
         _add_str(_ascii(INSTALL_DRIVERS_BAT),               "install_drivers.bat", mode=0o644)
         _add_str(_ascii(UNINSTALL_BAT),                     "uninstall.bat",       mode=0o644)
+        _add_str(_UTF8_BOM + _ascii(CHECK_PS1),             "check.ps1",           mode=0o644)
+        _add_str(_ascii(CHECK_BAT),                         "check.bat",           mode=0o644)
         _add_str(_readme(target_os, arch), "README.txt", mode=0o644)
         info("  + install / uninstall / driver scripts added to bundle")
         info("  + install.sh / install.ps1 / install.bat / README.txt")
@@ -1713,4 +2063,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()  
+    main()
