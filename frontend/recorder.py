@@ -54,7 +54,6 @@ class Recorder:
             if values is not None:
                 header.append(header_name)
                 columns.append(values)
-
         calibrated_fields = (
             ("amplitude_dbm", "amplitude_dbm"),
             ("max_hold_dbm", "max_hold_dbm"),

@@ -10,7 +10,9 @@ A desktop spectrum analyzer for receiving and displaying live RF signals with:
 The application continuously receives complex IQ samples from the selected
 source, calculates an FFT, and displays a live spectrum and waterfall. Existing
 analysis features include clear/write, max hold, min hold, averaging, peak
-measurements, markers, delta markers, occupied bandwidth, and CSV export.
+measurements, markers, delta markers, occupied bandwidth, adaptive multi-carrier
+detection, and CSV export. The same pipeline is also served to a browser console
+through `run_web.py`.
 A small, slow-blinking red marker automatically follows the strongest live FFT
 bin. Six normal/delta markers can be attached to CW, Max hold, Min hold, or
 Average, with one trace selected for all markers at a time. Marker selection
@@ -30,6 +32,7 @@ defaults to **None** so spectrum clicks cannot create markers accidentally.
 - [Running with an SDR](#running-with-an-sdr)
 - [Using the interface](#using-the-interface)
 - [Measurements](#measurements)
+- [Carrier detection](#carrier-detection)
 - [Amplitude: dBFS and dBm](#amplitude-dbfs-and-dbm)
 - [Calibration guide](calibration.md)
 - [Project structure](#project-structure)
@@ -49,8 +52,11 @@ flowchart LR
     C --> D["Raw dBFS frequency bins"]
     D --> E["Raw traces plus calibrated dBm traces"]
     E --> F["Peaks and measurements"]
+    E --> I["Adaptive carrier detection"]
     F --> G["SpectrumFrame"]
-    G --> H["Spectrum, waterfall, markers and readouts"]
+    I --> G
+    G --> H["Desktop: spectrum, waterfall, markers, readouts"]
+    G --> J["Browser: binary WebSocket frames"]
 ```
 
 In simple terms:
@@ -65,10 +71,15 @@ In simple terms:
 5. `backend/measurements.py` and `backend/peak.py` calculate the measurement
    values. The renderer places the red auto-peak indicator on the strongest live
    FFT bin.
-6. `backend/controller.py` retains the raw dBFS values, applies the selected
-   device/serial calibration, and packages explicit dBFS and dBm fields into one
-   `SpectrumFrame`.
-7. Qt sends that frame to the spectrum renderer and waterfall in the frontend.
+6. `backend/carrier_detection.py` estimates the noise floor from the live trace
+   and returns the occupied carrier regions found in that frame. See
+   [Carrier detection](#carrier-detection).
+7. `backend/controller.py` retains the raw dBFS values, applies the selected
+   device/serial calibration, and packages explicit dBFS and dBm fields plus the
+   carrier list into one `SpectrumFrame`.
+8. Qt sends that frame to the spectrum renderer and waterfall in the frontend.
+   `webapp/server.py` sends the same frame to every connected browser through
+   `webapp/protocol.py`.
 
 The default FFT size is 4096. The approximate resolution bandwidth is:
 
@@ -381,6 +392,66 @@ Important interpretation notes:
   produce a large occupied-bandwidth value.
 - Channel power currently integrates the complete displayed span; there is no
   separately selected channel boundary.
+
+## Carrier detection
+
+`backend/carrier_detection.py` runs on every frame and returns a list of
+`CarrierRegion` objects. Both the desktop renderer and the browser console draw
+them as shaded overlays; the **Carrier** button toggles the overlay without
+stopping detection. The engine is frequency-domain, single-frame, and does not
+require prior knowledge of the transponder plan.
+
+### Stages
+
+1. **Smoothing.** An edge-padded moving average produces the core trace. The
+   window defaults to `2 * round(bins / 1024) + 1`, forced odd and clamped to
+   3-11 bins. Edge padding is required for dB data: `np.convolve(mode="same")`
+   would insert 0 dB outside the FFT and manufacture large false peaks beside a
+   -70 to -100 dBFS receiver floor.
+2. **Noise statistics.** The floor is the median of all bins at or below the
+   60th percentile, which excludes occupied bins from the estimate. Roughness is
+   a first-difference MAD, `sigma = 1.4826 * MAD(diff) / sqrt(2)`, so a slow
+   device passband slope is not mistaken for random noise.
+3. **Adaptive thresholds.** Two levels are derived from that estimate:
+
+   ```text
+   enter = noise + max(enter_threshold_db, 6 * sigma)
+   exit  = noise + max(exit_threshold_db, 3 * sigma)
+   ```
+
+   The configured margins (10 dB and 3 dB) act as minimum sensitivity
+   guarantees; a rough receiver automatically demands more separation.
+4. **Sustained-core rule.** A candidate region above `exit` is kept only if it
+   contains at least `minimum_width_bins` (default 50) *consecutive* bins above
+   `enter`. This is a core-length test, not a total-width test, so a
+   narrowband spur cannot pass by sitting on a wide noise hump.
+5. **Edge refinement.** Both boundaries are then re-measured against the
+   unsmoothed spectrum, requiring three consecutive bins above `exit` before an
+   edge is accepted. Smoothing biases edges inward; this restores the true
+   rising and falling edges without letting a single noisy bin extend the band.
+6. **Boundary rejection.** Regions touching bin 0 or the last bin are discarded
+   because there is no background on both sides to measure an edge against.
+   This removes FFT-boundary and passband-roll-off artifacts.
+7. **Confidence and merging.** Confidence is the peak's excess over `enter`,
+   normalised by `enter_threshold_db` and clipped to 0-1. Adjacent regions
+   separated by no more than `merge_gap_bins` are merged (default 0, off).
+
+### Tuning
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `enter_threshold_db` | 10.0 | Minimum core prominence above the noise floor |
+| `exit_threshold_db` | 3.0 | Level at which the occupied band edge is declared |
+| `smoothing_window` | auto | Odd bin count; `None` scales it with FFT size |
+| `minimum_width_bins` | 50 | Consecutive strong-core bins required |
+| `merge_gap_bins` | 0 | Bridge gap between adjacent regions |
+
+`minimum_width_bins` is the main false-alarm control. Because it counts bins,
+its equivalent bandwidth is `minimum_width_bins x RBW`, so it changes with
+sample rate: 50 bins at 20 MS/s is roughly 244 kHz, while the same 50 bins at
+2 MS/s is roughly 24 kHz. Raise it when a device's spurs are being reported as
+carriers, and lower it when narrow carriers are being missed.
+
 ## Amplitude: dBFS and dBm
 
 The SDR supplies normalized digital IQ values. Therefore, the backend can
@@ -427,43 +498,57 @@ complete dBm UI path; it does not represent power at a physical RF connector.
 
 ```text
 freqanalyzer/
-|-- run.py                    Application entry point
+|-- run.py                    Desktop application entry point
 |-- run_web.py                Browser/server entry point
 |-- README.md                 Project overview and usage
 |-- INSTALL.md                Detailed drivers and offline installation
 |-- calibration.md            Frequency and dBFS-to-dBm calibration procedure
 |-- calibration.json          Device and serial-specific calibration values
+|-- non_linear_offset.json    Measured non-linear frequency offset table
 |-- environment.yml           Complete Conda environment
 |-- requirements.txt          Python-only requirements
 |-- backend/
 |   |-- acquisition.py        SoapySDR streaming and IQ simulator
 |   |-- controller.py         IQ-to-SpectrumFrame processing pipeline
-|   |-- calibration.py        Calibration file loader
+|   |-- device_profiles.py    Sample-rate, span, gain, and tuning limits
+|   |-- calibration.py        Frequency calibration file loader
+|   |-- power_calibration.py  dBFS-to-dBm offset schemas and lookup
+|   |-- carrier_detection.py  Adaptive multi-carrier detection engine
 |   |-- dsp.py                Window, FFT, frequency axis, and dBFS
 |   |-- trace.py              Live, max/min hold, and average traces
 |   |-- peak.py               Peak detection
 |   |-- measurements.py       Spectrum measurements
 |   |-- models.py             Shared data structures
+|   |-- settings.py           Shared defaults
 |   |-- main.py               Command-line SDR discovery diagnostic
+|   |-- sdr.py                Legacy direct-device helper
 |   |-- capture.py            Legacy HackRF file-capture helper
 |   |-- iqreader.py           Legacy IQ-file reader
 |   `-- plot.py               Legacy matplotlib plot helper
 |-- frontend/
 |   |-- gui.py                Main window, controls, status, and backend bridge
-|   |-- renderer.py           Spectrum traces and marker behavior
+|   |-- renderer.py           Spectrum traces, carrier overlay, and markers
 |   |-- waterfall.py          Waterfall history display
+|   |-- amplitude.py          dBm/dBFS field selection for the display layer
 |   |-- freq_control.py       Frequency/unit input widget
 |   |-- marker_dropdown.py    M1 through M6 selector
-|   `-- recorder.py           Screenshot and CSV export
+|   `-- recorder.py           Screenshot and dBFS/dBm CSV export
 |-- webapp/
-|   |-- server.py             Web API, control lease, and SDR coordinator
-|   |-- protocol.py           Binary Float32 spectrum protocol
-|   `-- static/               HTML, CSS, and Canvas/WebGL-free browser UI
+|   |-- server.py             FastAPI app, control lease, and SDR coordinator
+|   |-- protocol.py           Binary Float32 spectrum frame codec
+|   `-- static/
+|       |-- index.html        Browser console markup
+|       |-- app.js            Canvas spectrum, waterfall, markers, controls
+|       `-- styles.css        Instrument palette
 `-- tests/
-    |-- test_acquisition.py    Mock SDR and live simulator tests
-    |-- test_gui.py            Device profiles and tabbed UI tests
-    |-- test_pipeline.py       DSP, tone, span, hold, and average tests
-    `-- test_renderer.py       Auto-peak and multi-trace marker tests
+    |-- test_acquisition.py       Mock SDR and live simulator tests
+    |-- test_calibration.py       Frequency and power offset lookup tests
+    |-- test_carrier_detection.py Detection thresholds and edge-case tests
+    |-- test_gui.py               Device profiles and tabbed UI tests
+    |-- test_pipeline.py          DSP, tone, span, hold, and average tests
+    |-- test_recorder.py          CSV column and export tests
+    |-- test_renderer.py          Auto-peak and multi-trace marker tests
+    `-- test_web.py               Protocol codec and web API tests
 ```
 
 `backend/main.py` is a discovery diagnostic, not the graphical application.
@@ -486,6 +571,10 @@ The tests verify:
 - isolated HackRF/USRP/Pluto selection and mocked hardware configuration
 - X300-series/HackRF/Pluto profile limits and marker-disabled UI state
 - real-time simulator delivery through the normal analyzer pipeline
+- frequency and power calibration lookup, including missing/invalid offsets
+- carrier detection thresholds, sustained-core rejection, and edge refinement
+- CSV export columns for both uncalibrated and calibrated frames
+- binary spectrum packet round-trip and the web API request validation
 
 Run a syntax check with:
 

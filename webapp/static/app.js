@@ -1,7 +1,33 @@
 (() => {
   "use strict";
 
-  const $ = (id) => document.getElementById(id);
+  // A missing element used to return null, so one stale markup/script pairing
+  // threw inside wireControls() and aborted initialize() before it ever
+  // reached /api/profiles or the WebSocket. The stub keeps the rest of the
+  // interface alive and the audit reports exactly what is missing.
+  const missingElements = new Set();
+  const elementStub = () => {
+    const node = document.createElement("span");
+    node.style.display = "none";
+    return node;
+  };
+  const $ = (id) => {
+    const node = document.getElementById(id);
+    if (node) return node;
+    missingElements.add(id);
+    return elementStub();
+  };
+
+  function auditElements() {
+    if (!missingElements.size) return;
+    const ids = Array.from(missingElements).join(", ");
+    console.error(
+      `[analyzer] index.html is missing ${missingElements.size} element(s) `
+      + `expected by app.js: ${ids}. The browser is probably serving a cached `
+      + "app.js or index.html \u2014 hard-reload (Ctrl+Shift+R).",
+    );
+    toast(`Interface files are out of date (${missingElements.size} missing element(s)) \u2014 hard-reload the page`, "error");
+  }
   const encoder = new TextDecoder();
   const clientId = localStorage.getItem("rf-analyzer-client-id")
     || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
@@ -23,6 +49,24 @@
     viewStart: null,
     viewStop: null,
     carriersVisible: true,
+    carriers: [],
+    carrierUnit: "dBFS",
+    selectedCarrier: null,
+    lastCarrierPaint: 0,
+    autoPeakVisible: true,
+    lastPeakBlink: 0,
+    logging: false,
+    logRows: [],
+    logIntervalMs: 1000,
+    logColumns: [],
+    logUnit: "dBFS",
+    watchList: [],
+    watchSequence: 1,
+    watchTrace: "average",
+    watchAperture: 5,
+    lastWatchPaint: 0,
+    logNextDue: 0,
+    logStartedAt: 0,
     activeMarker: 0,
     markerTrace: "amplitude",
     markers: new Map(),
@@ -70,7 +114,13 @@
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const message = payload.detail || `Request failed (${response.status})`;
-      if (response.status === 409) updateControlUI(payload);
+      if (response.status === 409) {
+        // refresh lease ownership from the authoritative snapshot
+        fetch(`/api/state?client_id=${encodeURIComponent(clientId)}`, { headers: authHeaders() })
+          .then((r) => r.json())
+          .then(handleServerState)
+          .catch(() => {});
+      }
       throw new Error(message);
     }
     return payload;
@@ -312,6 +362,8 @@
       clearWaterfall();
     }
     updateMeasurements(header, traces);
+    updateCarriers(header);
+    sampleAmplitudeLog(header, traces);
     $("emptyState").hidden = true;
   }
 
@@ -347,6 +399,7 @@
     $("channelPower").textContent = `${header.channel_power.toFixed(2)} ${unit}`;
     $("rbwValue").textContent = formatFrequency(header.rbw, 3);
     $("carrierCount").textContent = String((header.carriers || []).length);
+    $("carrierPowerHeader").textContent = `Power (${unit})`;
     $("calibrationStatus").textContent = header.power_calibrated ? "Calibrated dBm" : "Raw dBFS";
     $("calibrationStatus").className = header.power_calibrated ? "good" : "warn";
     $("referenceUnit").textContent = unit;
@@ -427,6 +480,8 @@
     for (const [name, visible] of enabled) {
       if (visible) drawTrace(g, header, traces[name], name, startIndex, stopIndex);
     }
+    drawWatchLines(g, header);
+    drawAutoPeak(g, header, traces[state.markerTrace] || traces.amplitude, startIndex, stopIndex);
     drawAutoPeak(
       g,
       header,
@@ -474,22 +529,137 @@
     spectrumCtx.restore();
   }
 
+  // ---------------------------------------------------------------- carriers
+  // The detector runs at full frame rate on the server; the DOM table is
+  // repainted at 5 Hz so a 30 fps stream never competes with layout work.
+  const CARRIER_TABLE_INTERVAL_MS = 200;
+
+  function updateCarriers(header) {
+    state.carriers = header.carriers || [];
+    state.carrierUnit = header.unit;
+    if (state.selectedCarrier != null
+      && !state.carriers.some((carrier) => carrier.id === state.selectedCarrier)) {
+      state.selectedCarrier = null;
+    }
+    const now = performance.now();
+    if (now - state.lastCarrierPaint < CARRIER_TABLE_INTERVAL_MS) return;
+    state.lastCarrierPaint = now;
+    paintCarrierTable(header);
+  }
+
+  function paintCarrierTable(header) {
+    const body = $("carrierTable");
+    const carriers = state.carriers;
+    $("carrierActive").textContent = String(carriers.length);
+    const occupancy = carriers.reduce((total, c) => total + (c.occupied_bandwidth || 0), 0);
+    $("carrierOccupancy").textContent = occupancy > 0 ? formatFrequency(occupancy, 3) : "—";
+    if (!carriers.length) {
+      body.innerHTML = '<tr class="placeholder-row"><td colspan="4">No carriers detected</td></tr>';
+      return;
+    }
+    const unit = header.unit;
+    const rows = carriers.map((carrier) => {
+      const centre = (carrier.center_frequency / 1e6).toFixed(4);
+      const obw = (carrier.occupied_bandwidth / 1e3).toFixed(1);
+      const power = Number.isFinite(carrier.power) ? carrier.power.toFixed(2) : "—";
+      const classes = [];
+      if (carrier.id === state.selectedCarrier) classes.push("selected");
+      if (carrier.confidence < 0.5) classes.push("stale");
+      const title = Number.isFinite(carrier.snr) ? ` title="SNR ${carrier.snr.toFixed(1)} dB"` : "";
+      return `<tr class="${classes.join(" ")}" data-carrier="${carrier.id}"${title}>`
+        + `<td class="carrier-id">C${carrier.id}</td>`
+        + `<td>${centre}</td><td>${obw}</td><td>${power === "—" ? power : `${power} ${unit}`}</td></tr>`;
+    });
+    body.innerHTML = rows.join("");
+    body.querySelectorAll("tr[data-carrier]").forEach((row) => {
+      row.addEventListener("click", () => selectCarrier(Number(row.dataset.carrier)));
+    });
+  }
+
+  function selectCarrier(id) {
+    const carrier = state.carriers.find((item) => item.id === id);
+    if (!carrier || !state.latestFrame) return;
+    state.selectedCarrier = state.selectedCarrier === id ? null : id;
+    if (state.selectedCarrier != null) {
+      // Frame the carrier with one occupied bandwidth of context either side.
+      const margin = Math.max(carrier.occupied_bandwidth, state.latestFrame.header.rbw * 20);
+      const { header } = state.latestFrame;
+      const low = header.frequency_start;
+      const high = header.frequency_start + header.frequency_step * (header.bins - 1);
+      state.viewStart = Math.max(low, carrier.center_frequency - carrier.occupied_bandwidth / 2 - margin);
+      state.viewStop = Math.min(high, carrier.center_frequency + carrier.occupied_bandwidth / 2 + margin);
+      clearWaterfall();
+    }
+    paintCarrierTable(state.latestFrame.header);
+  }
+
+  function exportCarrierCsv() {
+    if (!state.carriers.length) return toast("No carriers are currently detected", "error");
+    const header = state.latestFrame.header;
+    const calibrated = header.power_calibrated && Number.isFinite(header.power_offset_db);
+    const unit = calibrated ? "dbm" : "dbfs";
+    const columns = [
+      "timestamp_utc", "carrier_id", "center_frequency_hz", "occupied_bandwidth_hz",
+      `band_power_${unit}`, `peak_power_${unit}`, `noise_floor_${unit}`,
+      "snr_db", "left_bin", "right_bin", "confidence", "age_frames",
+    ];
+    const stamp = new Date(header.timestamp * 1000).toISOString();
+    const cell = (value) => (Number.isFinite(value) ? value : "");
+    const lines = [columns.join(",")];
+    for (const carrier of state.carriers) {
+      lines.push([
+        stamp, carrier.id, carrier.center_frequency, carrier.occupied_bandwidth,
+        cell(carrier.power), cell(carrier.peak_power), cell(carrier.noise_floor),
+        cell(carrier.snr), carrier.left, carrier.right, carrier.confidence, carrier.age,
+      ].join(","));
+    }
+    downloadBlob(new Blob([lines.join("\n")], { type: "text/csv" }), `carriers-${Date.now()}.csv`);
+  }
+
   function drawCarriers(g, header) {
     spectrumCtx.save();
+    spectrumCtx.textBaseline = "top";
     for (const carrier of header.carriers || []) {
       const leftFreq = header.frequency_start + carrier.left * header.frequency_step;
       const rightFreq = header.frequency_start + carrier.right * header.frequency_step;
       const left = Math.max(g.left, frequencyToX(leftFreq, g));
       const right = Math.min(g.right, frequencyToX(rightFreq, g));
       if (right <= g.left || left >= g.right) continue;
+      const selected = carrier.id === state.selectedCarrier;
+      const alpha = selected ? .26 : .13;
       const gradient = spectrumCtx.createLinearGradient(left, 0, right, 0);
       gradient.addColorStop(0, "rgba(69, 213, 154, .02)");
-      gradient.addColorStop(.5, "rgba(69, 213, 154, .13)");
+      gradient.addColorStop(.5, `rgba(69, 213, 154, ${alpha})`);
       gradient.addColorStop(1, "rgba(69, 213, 154, .02)");
       spectrumCtx.fillStyle = gradient;
       spectrumCtx.fillRect(left, g.top, right - left, g.height);
+      spectrumCtx.strokeStyle = selected ? "rgba(120, 255, 200, .8)" : "rgba(69, 213, 154, .35)";
       spectrumCtx.strokeStyle = "rgba(0, 255, 13, 0.38)";
       spectrumCtx.strokeRect(left, g.top, right - left, g.height);
+
+      // Occupied-bandwidth extent marker at the measured centre frequency.
+      const centreX = frequencyToX(carrier.center_frequency, g);
+      if (centreX > g.left && centreX < g.right) {
+        spectrumCtx.setLineDash([3, 3]);
+        spectrumCtx.strokeStyle = "rgba(69, 213, 154, .5)";
+        spectrumCtx.beginPath();
+        spectrumCtx.moveTo(centreX, g.top);
+        spectrumCtx.lineTo(centreX, g.bottom);
+        spectrumCtx.stroke();
+        spectrumCtx.setLineDash([]);
+      }
+
+      if (right - left > 26) {
+        const power = Number.isFinite(carrier.power) ? `  ${carrier.power.toFixed(1)} ${header.unit}` : "";
+        const label = `C${carrier.id}${power}`;
+        spectrumCtx.font = "bold 9px Cascadia Mono, Consolas, monospace";
+        const width = spectrumCtx.measureText(label).width + 8;
+        const boxLeft = Math.min(left + 3, g.right - width);
+        spectrumCtx.fillStyle = "rgba(3, 12, 8, .82)";
+        spectrumCtx.fillRect(boxLeft, g.top + 3, width, 13);
+        spectrumCtx.fillStyle = selected ? "#b6ffd9" : "#45d59a";
+        spectrumCtx.fillText(label, boxLeft + 4, g.top + 5);
+      }
     }
     spectrumCtx.restore();
   }
@@ -531,9 +701,36 @@
     return index;
   }
 
+  function drawWatchLines(g, header) {
+    if (!state.watchList.length) return;
+    spectrumCtx.save();
+    spectrumCtx.setLineDash([2, 4]);
+    spectrumCtx.lineWidth = 1;
+    spectrumCtx.font = "9px Cascadia Mono, Consolas, monospace";
+    spectrumCtx.textBaseline = "bottom";
+    state.watchList.forEach((item, index) => {
+      const x = frequencyToX(item.frequency, g);
+      if (x < g.left || x > g.right) return;
+      spectrumCtx.strokeStyle = watchColor(index);
+      spectrumCtx.globalAlpha = state.logging ? .85 : .45;
+      spectrumCtx.beginPath();
+      spectrumCtx.moveTo(Math.round(x) + .5, g.top);
+      spectrumCtx.lineTo(Math.round(x) + .5, g.bottom);
+      spectrumCtx.stroke();
+      spectrumCtx.globalAlpha = 1;
+      spectrumCtx.fillStyle = watchColor(index);
+      spectrumCtx.fillText(`F${index + 1}`, x + 3, g.bottom - 3);
+    });
+    spectrumCtx.restore();
+  }
+
   function drawAutoPeak(g, header, values, startIndex, stopIndex) {
-    if (!values.length) return;
+    // Mirrors renderer.py _update_auto_peak_marker(): the automatic peak
+    // indicator is bound to whichever trace the marker system is attached to,
+    // so a max-hold peak is never reported against a clear-write trace.
+    if (!values || !values.length || !state.autoPeakVisible) return;
     const index = visiblePeak(values, startIndex, stopIndex);
+    if (!Number.isFinite(values[index])) return;
     const x = frequencyToX(header.frequency_start + index * header.frequency_step, g);
     const y = amplitudeToY(values[index], g);
     spectrumCtx.save();
@@ -732,7 +929,13 @@
     waterfallCtx.restore();
   }
 
+  const AUTO_PEAK_BLINK_MS = 700;
+
   function renderLoop(now) {
+    if (now - state.lastPeakBlink >= AUTO_PEAK_BLINK_MS) {
+      state.lastPeakBlink = now;
+      state.autoPeakVisible = !state.autoPeakVisible;
+    }
     drawSpectrum();
     if (state.latestFrame && state.renderedSequence !== state.frameSequence) {
       drawWaterfallRow(state.latestFrame);
@@ -744,6 +947,7 @@
       state.receivedThisSecond = 0;
       state.lastFpsTick = now;
       $("fpsStatus").textContent = `FPS: ${state.fps.toFixed(1)}`;
+      if (state.logging) updateLoggerReadout();
     }
     requestAnimationFrame(renderLoop);
   }
@@ -905,6 +1109,430 @@
     $("deltaButton").classList.toggle("active", marker.deltaFrequency != null);
   }
 
+  // ------------------------------------------------------------ amplitude log
+  // Logs the amplitude of user-specified frequencies over time. Sampling is
+  // frame-driven: a sample is only taken when a frame arrives at or after the
+  // next due time, so a stalled stream leaves a gap in the timestamps rather
+  // than duplicating the last good value.
+  const LOG_ROW_LIMIT = 200000;
+  const WATCH_COLORS = [
+    "#45d59a", "#54b9ff", "#f3b74f", "#c58cff",
+    "#ff7d7d", "#5ee6e0", "#ffa45c", "#9cd94a",
+  ];
+
+  function watchColor(index) {
+    return WATCH_COLORS[index % WATCH_COLORS.length];
+  }
+
+  function addWatchFrequency() {
+    const value = Number($("watchInput").value);
+    const scale = Number($("watchUnit").value);
+    if (!Number.isFinite(value) || value <= 0) {
+      return toast("Enter a frequency to track", "error");
+    }
+    const frequency = value * scale;
+    if (state.watchList.some((item) => Math.abs(item.frequency - frequency) < 1)) {
+      return toast("That frequency is already tracked", "error");
+    }
+    if (state.logging) {
+      // Adding a column mid-session would leave earlier rows short.
+      return toast("Stop logging before changing the tracked frequencies", "error");
+    }
+    state.watchList.push({ id: state.watchSequence++, frequency, level: null });
+    $("watchInput").value = "";
+    renderWatchList();
+  }
+
+  function removeWatchFrequency(id) {
+    if (state.logging) return toast("Stop logging before changing the tracked frequencies", "error");
+    state.watchList = state.watchList.filter((item) => item.id !== id);
+    renderWatchList();
+  }
+
+  function renderWatchList() {
+    const list = $("watchList");
+    if (!state.watchList.length) {
+      list.innerHTML = '<li class="watch-empty">Add one or more frequencies to log.</li>';
+    } else {
+      list.innerHTML = state.watchList.map((item, index) => {
+        const level = Number.isFinite(item.level)
+          ? `${item.level.toFixed(2)} ${state.logUnit}`
+          : "—";
+        const stale = Number.isFinite(item.level) ? "" : " stale";
+        return `<li data-watch="${item.id}">`
+          + `<i class="watch-swatch" style="background:${watchColor(index)}"></i>`
+          + `<span class="watch-freq">${formatFrequency(item.frequency, 6)}</span>`
+          + `<span class="watch-level${stale}">${level}</span>`
+          + `<button class="watch-remove" type="button" aria-label="Remove">×</button></li>`;
+      }).join("");
+      list.querySelectorAll("li[data-watch]").forEach((node) => {
+        node.querySelector(".watch-remove").addEventListener("click", () => {
+          removeWatchFrequency(Number(node.dataset.watch));
+        });
+      });
+    }
+    $("logToggleButton").disabled = !state.watchList.length;
+    updateLoggerReadout();
+  }
+
+  // Amplitude at one tracked frequency. A single bin is fragile: HackRF tuning
+  // error of a few ppm is several bins wide at 4.9 kHz RBW, so the detector
+  // takes the peak over a small aperture around the requested frequency.
+  function sampleAt(header, values, frequency) {
+    const target = Math.round((frequency - header.frequency_start) / header.frequency_step);
+    if (target < 0 || target >= values.length) return null;
+    const aperture = state.watchAperture;
+    const low = Math.max(0, target - aperture);
+    const high = Math.min(values.length - 1, target + aperture);
+    let best = null;
+    for (let i = low; i <= high; i += 1) {
+      if (!Number.isFinite(values[i])) continue;
+      if (best === null || values[i] > best) best = values[i];
+    }
+    return best;
+  }
+
+  function sampleAmplitudeLog(header, traces) {
+    if (!state.watchList.length) return;
+    const values = traces[state.watchTrace] || traces.average || traces.amplitude;
+    if (!values || !values.length) return;
+    state.logUnit = header.unit;
+
+    const levels = state.watchList.map((item) => {
+      const level = sampleAt(header, values, item.frequency);
+      item.level = level;
+      return level;
+    });
+
+    const now = performance.now();
+    if (now - state.lastWatchPaint > 200) {
+      state.lastWatchPaint = now;
+      renderWatchList();
+    }
+    if (!state.logging) return;
+
+    const wall = Date.now();
+    if (wall < state.logNextDue) return;
+    // Advance on the grid rather than from `wall`, so interval error does not
+    // accumulate over a long session.
+    state.logNextDue += state.logIntervalMs
+      * Math.max(1, Math.ceil((wall - state.logNextDue) / state.logIntervalMs));
+
+    state.logRows.push({ time: header.timestamp * 1000, levels });
+    if (state.logRows.length >= LOG_ROW_LIMIT) {
+      stopLogging();
+      toast(`Logging stopped at the ${LOG_ROW_LIMIT.toLocaleString()} sample buffer limit`, "error");
+    }
+    updateLoggerReadout();
+  }
+
+  function updateLoggerReadout() {
+    const count = state.logRows.length;
+    $("logCount").textContent = count.toLocaleString();
+    $("logExportButton").disabled = count === 0;
+    $("logClearButton").disabled = count === 0 || state.logging;
+    $("logStatus").hidden = !state.logging;
+    $("logStatus").textContent = `REC ${count.toLocaleString()}`;
+    if (state.logging) {
+      const seconds = Math.max(0, (Date.now() - state.logStartedAt) / 1000);
+      const minutes = Math.floor(seconds / 60);
+      $("logElapsed").textContent = minutes
+        ? `${minutes}m ${String(Math.floor(seconds % 60)).padStart(2, "0")}s`
+        : `${seconds.toFixed(0)}s`;
+    }
+  }
+
+  function startLogging() {
+    if (!state.latestFrame) return toast("Start acquisition before logging", "error");
+    if (!state.watchList.length) return toast("Add at least one frequency to track", "error");
+    if (state.logRows.length && state.logColumns.length !== state.watchList.length) {
+      state.logRows = [];
+    }
+    state.logIntervalMs = Number($("logIntervalSelect").value);
+    state.watchTrace = $("watchTrace").value;
+    state.watchAperture = Number($("watchDetector").value);
+    state.logColumns = state.watchList.map((item) => item.frequency);
+    state.logging = true;
+    state.logStartedAt = Date.now();
+    state.logNextDue = state.logStartedAt;
+    for (const id of ["logIntervalSelect", "watchTrace", "watchDetector", "watchAddButton"]) {
+      $(id).disabled = true;
+    }
+    $("logToggleButton").textContent = "Stop logging";
+    $("logToggleButton").classList.add("recording");
+    document.querySelector(".logger-card").classList.add("recording");
+    updateLoggerReadout();
+    toast(`Logging ${state.watchList.length} frequency(s) every ${state.logIntervalMs} ms`);
+  }
+
+  function stopLogging() {
+    if (!state.logging) return;
+    state.logging = false;
+    for (const id of ["logIntervalSelect", "watchTrace", "watchDetector", "watchAddButton"]) {
+      $(id).disabled = false;
+    }
+    $("logToggleButton").textContent = "Start logging";
+    $("logToggleButton").classList.remove("recording");
+    document.querySelector(".logger-card").classList.remove("recording");
+    updateLoggerReadout();
+  }
+
+  function logTraceLabel(key) {
+    return {
+      average: "average", amplitude: "clear_write",
+      max_hold: "max_hold", min_hold: "min_hold",
+    }[key] || key;
+  }
+
+  function buildLogCsv() {
+    // Timestamp plus one amplitude column per tracked frequency, nothing else.
+    const unit = state.logUnit.toLowerCase();
+    const columns = ["timestamp_utc"].concat(
+      state.logColumns.map((frequency) => `${(frequency / 1e6).toFixed(6)}MHz_${unit}`),
+    );
+    const lines = [columns.join(",")];
+    for (const row of state.logRows) {
+      lines.push([new Date(row.time).toISOString()].concat(
+        row.levels.map((level) => (Number.isFinite(level) ? level.toFixed(3) : "")),
+      ).join(","));
+    }
+    return lines.join("\n");
+  }
+
+  function exportAmplitudeLog() {
+    if (!state.logRows.length) return toast("The amplitude log is empty", "error");
+    const started = new Date(state.logRows[0].time);
+    const pad = (value) => String(value).padStart(2, "0");
+    const stamp = `${started.getFullYear()}-${pad(started.getMonth() + 1)}-${pad(started.getDate())}`
+      + `_${pad(started.getHours())}${pad(started.getMinutes())}${pad(started.getSeconds())}`;
+    downloadBlob(
+      new Blob([buildLogCsv()], { type: "text/csv" }),
+      `amplitude-log_${stamp}_${logTraceLabel(state.watchTrace)}.csv`,
+    );
+  }
+
+  // ------------------------------------------------------------- log plotting
+  const logPlot = { series: [], times: [], unit: "dB", title: "", hidden: new Set(), hover: null };
+
+  function openLogPlot() {
+    $("logPlotModal").hidden = false;
+    if (!logPlot.series.length && state.logRows.length) plotCurrentSession();
+    else drawLogPlot();
+  }
+
+  function plotCurrentSession() {
+    if (!state.logRows.length) return toast("The amplitude log is empty", "error");
+    loadLogPlot(
+      state.logRows.map((row) => row.time),
+      state.logColumns.map((frequency, index) => ({
+        label: formatFrequency(frequency, 6),
+        values: state.logRows.map((row) => row.levels[index]),
+      })),
+      state.logUnit,
+      "Session buffer",
+    );
+  }
+
+  // Parses the CSV this logger writes, and any CSV whose first column is a
+  // timestamp and whose remaining columns are numeric.
+  function parseLogCsv(text, name) {
+    const rows = text.trim().split(/\r?\n/).filter(Boolean);
+    if (rows.length < 2) throw new Error("The file contains no data rows");
+    const headers = rows[0].split(",").map((cell) => cell.trim());
+    const times = [];
+    const columns = headers.slice(1).map(() => []);
+    for (let r = 1; r < rows.length; r += 1) {
+      const cells = rows[r].split(",");
+      const time = Date.parse(cells[0]);
+      if (!Number.isFinite(time)) continue;
+      times.push(time);
+      for (let c = 0; c < columns.length; c += 1) {
+        // Number("") is 0, which would plot a blank cell as a 0 dB spike
+        // rather than the gap it actually represents.
+        const cell = (cells[c + 1] || "").trim();
+        const value = cell === "" ? NaN : Number(cell);
+        columns[c].push(Number.isFinite(value) ? value : null);
+      }
+    }
+    if (!times.length) throw new Error("No parsable timestamps in the first column");
+    const unitMatch = /_(dbm|dbfs)$/i.exec(headers[1] || "");
+    const series = headers.slice(1)
+      .map((label, index) => ({ label: label.replace(/_(dbm|dbfs)$/i, ""), values: columns[index] }))
+      .filter((item) => item.values.some((value) => value !== null));
+    if (!series.length) throw new Error("No numeric amplitude columns found");
+    return { times, series, unit: unitMatch ? unitMatch[1].replace("dbm", "dBm").replace("dbfs", "dBFS") : "dB", title: name };
+  }
+
+  function loadLogPlot(times, series, unit, title) {
+    logPlot.times = times;
+    logPlot.series = series;
+    logPlot.unit = unit;
+    logPlot.title = title;
+    logPlot.hidden = new Set();
+    $("logPlotTitle").textContent = title;
+    const span = (times[times.length - 1] - times[0]) / 1000;
+    $("logPlotMeta").textContent =
+      `${times.length.toLocaleString()} samples · ${series.length} series · ${span.toFixed(1)} s`;
+    renderLogLegend();
+    drawLogPlot();
+  }
+
+  function renderLogLegend() {
+    $("logPlotLegend").innerHTML = logPlot.series.map((item, index) =>
+      `<button type="button" data-series="${index}" class="${logPlot.hidden.has(index) ? "off" : ""}">`
+      + `<i style="background:${watchColor(index)}"></i>${item.label}</button>`).join("");
+    $("logPlotLegend").querySelectorAll("button").forEach((node) => {
+      node.addEventListener("click", () => {
+        const index = Number(node.dataset.series);
+        if (logPlot.hidden.has(index)) logPlot.hidden.delete(index);
+        else logPlot.hidden.add(index);
+        renderLogLegend();
+        drawLogPlot();
+      });
+    });
+  }
+
+  function drawLogPlot() {
+    const canvas = $("logPlotCanvas");
+    const ctx = canvas.getContext("2d");
+    const ratio = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (!width || !height) return;
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    const visible = logPlot.series.filter((_, index) => !logPlot.hidden.has(index));
+    $("logPlotEmpty").hidden = visible.length > 0;
+    if (!visible.length) return;
+
+    const g = { left: 58, right: width - 14, top: 14, bottom: height - 26 };
+    g.width = g.right - g.left;
+    g.height = g.bottom - g.top;
+
+    let min = Infinity;
+    let max = -Infinity;
+    for (const item of visible) {
+      for (const value of item.values) {
+        if (value === null || !Number.isFinite(value)) continue;
+        if (value < min) min = value;
+        if (value > max) max = value;
+      }
+    }
+    if (!Number.isFinite(min)) return;
+    const pad = Math.max(1, (max - min) * 0.12);
+    min -= pad;
+    max += pad;
+
+    const t0 = logPlot.times[0];
+    const t1 = logPlot.times[logPlot.times.length - 1] || t0 + 1;
+    const xOf = (time) => g.left + ((time - t0) / Math.max(1, t1 - t0)) * g.width;
+    const yOf = (value) => g.bottom - ((value - min) / (max - min)) * g.height;
+
+    ctx.strokeStyle = "rgba(255,255,255,.06)";
+    ctx.fillStyle = "#606b75";
+    ctx.font = "9px Cascadia Mono, Consolas, monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i <= 5; i += 1) {
+      const value = min + ((max - min) * i) / 5;
+      const y = Math.round(yOf(value)) + .5;
+      ctx.beginPath();
+      ctx.moveTo(g.left, y);
+      ctx.lineTo(g.right, y);
+      ctx.stroke();
+      ctx.fillText(`${value.toFixed(1)}`, g.left - 7, y);
+    }
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (let i = 0; i <= 4; i += 1) {
+      const time = t0 + ((t1 - t0) * i) / 4;
+      const x = Math.round(xOf(time)) + .5;
+      ctx.beginPath();
+      ctx.moveTo(x, g.top);
+      ctx.lineTo(x, g.bottom);
+      ctx.stroke();
+      const elapsed = (time - t0) / 1000;
+      const label = elapsed >= 120
+        ? `${Math.floor(elapsed / 60)}m${String(Math.round(elapsed % 60)).padStart(2, "0")}`
+        : `${elapsed.toFixed(1)}s`;
+      ctx.fillText(label, x, g.bottom + 6);
+    }
+    ctx.save();
+    ctx.translate(13, (g.top + g.bottom) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "center";
+    ctx.fillText(`Amplitude (${logPlot.unit})`, 0, 0);
+    ctx.restore();
+
+    // Long sessions carry far more samples than pixels; step so that at most
+    // two points are drawn per horizontal pixel.
+    const step = Math.max(1, Math.floor(logPlot.times.length / (g.width * 2)));
+    ctx.lineWidth = 1.4;
+    ctx.lineJoin = "round";
+    logPlot.series.forEach((item, index) => {
+      if (logPlot.hidden.has(index)) return;
+      ctx.strokeStyle = watchColor(index);
+      ctx.beginPath();
+      let open = false;
+      for (let i = 0; i < logPlot.times.length; i += step) {
+        const value = item.values[i];
+        if (value === null || !Number.isFinite(value)) { open = false; continue; }
+        const x = xOf(logPlot.times[i]);
+        const y = yOf(value);
+        if (open) ctx.lineTo(x, y);
+        else { ctx.moveTo(x, y); open = true; }
+      }
+      ctx.stroke();
+    });
+
+    if (logPlot.hover !== null) {
+      const x = Math.round(xOf(logPlot.times[logPlot.hover])) + .5;
+      ctx.strokeStyle = "rgba(255,255,255,.28)";
+      ctx.beginPath();
+      ctx.moveTo(x, g.top);
+      ctx.lineTo(x, g.bottom);
+      ctx.stroke();
+    }
+    logPlot.geometry = { g, xOf, t0, t1 };
+  }
+
+  function onLogPlotHover(event) {
+    if (!logPlot.times.length || !logPlot.geometry) return;
+    const rect = $("logPlotCanvas").getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const { g, t0, t1 } = logPlot.geometry;
+    const tooltip = $("logPlotTooltip");
+    if (x < g.left || x > g.right) {
+      tooltip.hidden = true;
+      logPlot.hover = null;
+      drawLogPlot();
+      return;
+    }
+    const time = t0 + ((x - g.left) / g.width) * (t1 - t0);
+    let index = 0;
+    let bestDelta = Infinity;
+    for (let i = 0; i < logPlot.times.length; i += 1) {
+      const delta = Math.abs(logPlot.times[i] - time);
+      if (delta < bestDelta) { bestDelta = delta; index = i; }
+    }
+    logPlot.hover = index;
+    const rows = logPlot.series
+      .map((item, seriesIndex) => ({ item, seriesIndex }))
+      .filter(({ seriesIndex }) => !logPlot.hidden.has(seriesIndex))
+      .map(({ item, seriesIndex }) => {
+        const value = item.values[index];
+        const text = Number.isFinite(value) ? `${value.toFixed(2)} ${logPlot.unit}` : "—";
+        return `<div><i style="background:${watchColor(seriesIndex)}"></i>${item.label} · ${text}</div>`;
+      }).join("");
+    tooltip.innerHTML = `<strong>${new Date(logPlot.times[index]).toLocaleTimeString()}</strong>${rows}`;
+    tooltip.hidden = false;
+    tooltip.style.left = `${Math.min(x + 14, rect.width - 190)}px`;
+    tooltip.style.top = "18px";
+    drawLogPlot();
+  }
+
   function downloadBlob(blob, filename) {
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -982,6 +1610,62 @@
     $("resetZoomButton").addEventListener("click", resetView);
     $("screenshotButton").addEventListener("click", exportScreenshot);
     $("csvButton").addEventListener("click", exportCsv);
+    $("carrierCsvButton").addEventListener("click", exportCarrierCsv);
+    $("logToggleButton").addEventListener("click", () => {
+      if (state.logging) stopLogging();
+      else startLogging();
+    });
+    $("logExportButton").addEventListener("click", exportAmplitudeLog);
+    $("logClearButton").addEventListener("click", () => {
+      state.logRows = [];
+      $("logElapsed").textContent = "\u2014";
+      updateLoggerReadout();
+    });
+    $("watchAddButton").addEventListener("click", addWatchFrequency);
+    $("watchInput").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); addWatchFrequency(); }
+    });
+    $("watchTrace").addEventListener("change", () => { state.watchTrace = $("watchTrace").value; });
+    $("watchDetector").addEventListener("change", () => {
+      state.watchAperture = Number($("watchDetector").value);
+    });
+    $("logPlotButton").addEventListener("click", openLogPlot);
+    $("logPlotClose").addEventListener("click", () => { $("logPlotModal").hidden = true; });
+    $("logPlotModal").addEventListener("click", (event) => {
+      if (event.target === $("logPlotModal")) $("logPlotModal").hidden = true;
+    });
+    $("logPlotCurrent").addEventListener("click", plotCurrentSession);
+    $("logFileInput").addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        const parsed = parseLogCsv(await file.text(), file.name);
+        loadLogPlot(parsed.times, parsed.series, parsed.unit, parsed.title);
+      } catch (error) {
+        toast(`Could not read that CSV: ${error.message}`, "error");
+      }
+      event.target.value = "";
+    });
+    $("logPlotCanvas").addEventListener("mousemove", onLogPlotHover);
+    $("logPlotCanvas").addEventListener("mouseleave", () => {
+      $("logPlotTooltip").hidden = true;
+      logPlot.hover = null;
+      drawLogPlot();
+    });
+    window.addEventListener("resize", () => {
+      if (!$("logPlotModal").hidden) drawLogPlot();
+    });
+    renderWatchList();
+    window.addEventListener("beforeunload", (event) => {
+      // The buffer lives only in this tab; a reload would silently discard it.
+      if (state.logging || state.logRows.length) event.preventDefault();
+    });
+    $("carrierZoomOutButton").addEventListener("click", () => {
+      state.selectedCarrier = null;
+      resetView();
+      clearWaterfall();
+      if (state.latestFrame) paintCarrierTable(state.latestFrame.header);
+    });
     $("resetMinButton").addEventListener("click", async () => {
       try {
         await api("/api/traces/min-hold/reset", {
@@ -1006,6 +1690,15 @@
     }));
     $("markerTraceSelect").addEventListener("change", () => {
       state.markerTrace = $("markerTraceSelect").value;
+      // The desktop forces the selected trace visible so the auto-peak and
+      // markers are never attached to a hidden curve.
+      const checkbox = {
+        amplitude: "traceLive", max_hold: "traceMax",
+        min_hold: "traceMin", average: "traceAverage",
+      }[state.markerTrace];
+      if (checkbox && !$(checkbox).checked) $(checkbox).checked = true;
+      state.autoPeakVisible = true;
+      state.lastPeakBlink = performance.now();
       const traceControl = {
         amplitude: $("traceLive"),
         max_hold: $("traceMax"),
@@ -1066,7 +1759,14 @@
   }
 
   async function initialize() {
-    wireControls();
+    try {
+      wireControls();
+    } catch (error) {
+      // Never let a wiring fault block acquisition or the stream.
+      console.error("[analyzer] wireControls failed", error);
+      toast(`Interface wiring error: ${error.message}`, "error");
+    }
+    auditElements();
     state.reference = Number($("referenceInput").value);
     try {
       state.profiles = await api("/api/profiles");

@@ -31,12 +31,17 @@ if str(ROOT) not in sys.path:
 from backend.acquisition import create_acquisition
 from backend.device_profiles import DEVICE_PROFILES
 from backend.models import AcquisitionConfig, SpectrumFrame
+from backend.amplitude_logger import AmplitudeLogger
 from frontend.renderer import SpectrumWidget
 from frontend.waterfall import WaterfallWidget
 from frontend.recorder import Recorder
 from frontend.freq_control import FrequencyControl
 from frontend.marker_dropdown import MarkerSelectorButton
+from PyQt6.QtWidgets import QAbstractSpinBox
+from frontend.theme import install_dark_palette, DOCK_QSS_PATCH
+from frontend.dock_titlebar import attach_dock_titlebar, wrap_dock_content
 from frontend.amplitude import amplitude_unit, scalar_amplitude, trace_amplitude
+from frontend.logger_panel import LoggerSetupDialog, LoggerPlotDialog
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +114,7 @@ class DeltaMarkerReadout(QWidget):
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(240, 160)
-        
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
@@ -190,11 +195,13 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self._last_frame = None
         self._last_frame_time = None
+        self._last_carrier_table_time = 0.0
+        self._carrier_table_unit = "dBFS"
         self._min_hold_was_enabled = False
         self._current_unit = "dBFS"
         # Base Layout Initialization
         self.setDockOptions(QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AnimatedDocks)
-        
+
         # Build UI Components
         self._build_central_widgets()
         self._build_toolbar_ribbon()
@@ -203,7 +210,7 @@ class MainWindow(QMainWindow):
         self._build_delta_readout()
         self._build_statusbar()
         self._build_panel_toggles()
-        
+
         # Wiring and configuration
         self._wire_actions()
         self._build_shortcuts()
@@ -211,7 +218,11 @@ class MainWindow(QMainWindow):
         self._setup_context_menu()
 
     def _apply_dark_theme(self):
-        self.setStyleSheet("""
+        # Palette first: it is the only layer that reaches native surfaces
+        # (floating dock top-levels, popups, QStyle-drawn spin arrows).
+        install_dark_palette()
+
+        qss = """
             QMainWindow { background-color: #000000; }
             QWidget {
                 color: #F2F2F2;
@@ -352,13 +363,34 @@ class MainWindow(QMainWindow):
                 background: #0B353C;
                 border-color: #33D6EE;
             }
+            QPushButton#LoggerButton {
+                background: #171717;
+                border: 1px solid #484848;
+            }
+            QPushButton#LoggerButton:checked {
+                background: #4A1212;
+                border-color: #E23636;
+                color: #FFB3B3;
+            }
             QToolTip {
                 background-color: #161616;
                 color: #FFFFFF;
                 border: 1px solid #585858;
                 padding: 4px;
             }
-        """)
+        """
+
+        # Application scope, NOT self.setStyleSheet(). A floating QDockWidget
+        # becomes its own top-level window and therefore leaves MainWindow's
+        # style-sheet scope entirely; every rule above would be dropped and the
+        # panel would fall back to the OS light palette. Installing on the
+        # QApplication keeps the cascade valid in both docked and floating state,
+        # and additionally covers LoggerSetupDialog / LoggerPlotDialog.
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss + DOCK_QSS_PATCH)
+        else:
+            self.setStyleSheet(qss + DOCK_QSS_PATCH)
 
     # -----------------------------------------------------------------------
     # Central Layout
@@ -373,7 +405,7 @@ class MainWindow(QMainWindow):
         center_split = QSplitter(Qt.Orientation.Vertical)
         center_split.addWidget(self.spectrum_widget)
         center_split.addWidget(self.waterfall_widget)
-        
+
         # 70% Spectrum, 30% Waterfall allocation
         center_split.setStretchFactor(0, 7)
         center_split.setStretchFactor(1, 3)
@@ -446,13 +478,18 @@ class MainWindow(QMainWindow):
         self.left_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.left_dock.setMinimumWidth(280)
         self.left_dock.setMaximumWidth(330)
-        
+
         container = QWidget()
+        # A bare QWidget has no background of its own; it inherits whatever the
+        # top-level surface provides, which is what turned the popped-out panel
+        # white. #DockBody + WA_StyledBackground makes the QSS authoritative.
+        container.setObjectName("DockBody")
+        container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
+
         # Frequency Group
         grp_freq = QGroupBox("Tuning")
         lyt_freq = QFormLayout(grp_freq)
@@ -468,15 +505,33 @@ class MainWindow(QMainWindow):
         self.sample_rate_combo = QComboBox()
         self.sample_rate_combo.addItems(["2", "5", "8", "10", "12.5", "16", "20"])
         self.sample_rate_combo.setCurrentText("20")
-        
+
         self.gain_spin = QSpinBox()
         self.gain_spin.setRange(0, 62)
         self.gain_spin.setValue(20)
-        
+
         self.reference_level_spin = QDoubleSpinBox()
         self.reference_level_spin.setRange(-150, 50)
         self.reference_level_spin.setValue(0)
         self.reference_level_spin.setSuffix(" dBm")
+
+        # Stepper buttons: keep them only where incremental nudging is the
+        # normal interaction (Span sweeps, Reference-level trimming). Centre
+        # frequency and VGA gain are typed absolutes, so the steppers are
+        # dead weight and encourage accidental retunes mid-capture.
+        # Sample rate is a QComboBox and has no steppers to begin with.
+        self.center_freq_ctrl.spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
+        self.gain_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
+        self.span_ctrl.spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.UpDownArrows
+        )
+        self.reference_level_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.UpDownArrows
+        )
 
         lyt_rx.addRow("Reference:", self.reference_level_spin)
         lyt_rx.addRow("SR (Msps):", self.sample_rate_combo)
@@ -488,7 +543,39 @@ class MainWindow(QMainWindow):
         self.lbl_profile_detail.setWordWrap(True)
         layout.addWidget(self.lbl_profile_detail)
 
-        self.left_dock.setWidget(container)
+        layout.addStretch(1)
+
+        # Amplitude Logger group — pinned to the bottom of the left panel.
+        grp_logger = QGroupBox("Amplitude Logger")
+        lyt_logger = QVBoxLayout(grp_logger)
+        self.btn_logger = QPushButton("Logger")
+        self.btn_logger.setObjectName("LoggerButton")
+        self.btn_logger.setCheckable(True)
+        self.btn_logger.setMinimumHeight(40)
+        self.btn_logger.setToolTip(
+            "Log the amplitude of up to 2 carrier frequencies to CSV every 10 s"
+        )
+        self.btn_logger_plot = QPushButton("Plot Logged Data")
+        lyt_logger.addWidget(self.btn_logger)
+        lyt_logger.addWidget(self.btn_logger_plot)
+        self.lbl_logger_status = QLabel("Logging: OFF")
+        self.lbl_logger_status.setObjectName("SectionLabel")
+        lyt_logger.addWidget(self.lbl_logger_status)
+        layout.addWidget(grp_logger)
+
+        # Every input the operator can use to change acquisition parameters.
+        # All of these are locked while a logging session is active so the
+        # frequency being logged always stays inside the live span.
+        self._acquisition_controls = [
+            self.center_freq_ctrl,
+            self.span_ctrl,
+            self.sample_rate_combo,
+            self.gain_spin,
+            self.sdr_type_combo,
+        ]
+
+        attach_dock_titlebar(self.left_dock, "Analyzer Setup")
+        self.left_dock.setWidget(wrap_dock_content(container))
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
 
     # -----------------------------------------------------------------------
@@ -534,6 +621,25 @@ class MainWindow(QMainWindow):
         lyt_meas.addRow("Occ Bandwidth:", self.lbl_meas_obw)
         lyt_meas.addRow("Channel Power:", self.lbl_meas_chan_pwr)
         measurements_layout.addWidget(grp_meas)
+
+        grp_carriers = QGroupBox("Live Carriers")
+        lyt_carriers = QVBoxLayout(grp_carriers)
+        self.table_carriers = QTableWidget(0, 4)
+        self.table_carriers.setHorizontalHeaderLabels(
+            ["ID", "Centre MHz", "OBW kHz", "Power dBFS"]
+        )
+        self.table_carriers.verticalHeader().setVisible(False)
+        self.table_carriers.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_carriers.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        header = self.table_carriers.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for col in (1, 2, 3):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        self.table_carriers.setMinimumHeight(150)
+        lyt_carriers.addWidget(self.table_carriers)
+        measurements_layout.addWidget(grp_carriers)
 
         grp_export = QGroupBox("Capture & Export")
         export_layout = QHBoxLayout(grp_export)
@@ -631,7 +737,14 @@ class MainWindow(QMainWindow):
         tabs.addTab(traces_tab, "Traces")
         tabs.addTab(markers_tab, "Markers")
         self.analysis_tabs = tabs
-        self.right_dock.setWidget(tabs)
+
+        # Same treatment as the left dock: the QTabWidget alone does not paint
+        # the region behind the tab bar when the dock is a top-level window.
+        tabs.setObjectName("DockBody")
+        tabs.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        attach_dock_titlebar(self.right_dock, "Analysis")
+        self.right_dock.setWidget(wrap_dock_content(tabs))
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.right_dock)
 
     def _build_panel_toggles(self):
@@ -648,6 +761,10 @@ class MainWindow(QMainWindow):
         self.btn_right_panel_toggle.clicked.connect(self._toggle_right_panel)
         self.left_dock.visibilityChanged.connect(self._sync_panel_toggles)
         self.right_dock.visibilityChanged.connect(self._sync_panel_toggles)
+        # A dock that is dragged out or re-docked shifts the central widget
+        # edges, so the arrow handles must be repositioned on float changes too.
+        self.left_dock.topLevelChanged.connect(self._sync_panel_toggles)
+        self.right_dock.topLevelChanged.connect(self._sync_panel_toggles)
         self._sync_panel_toggles()
 
     def _toggle_left_panel(self):
@@ -727,7 +844,7 @@ class MainWindow(QMainWindow):
         self.status_bar.addWidget(self.lbl_fft_size)
         self.status_bar.addWidget(QLabel(" | "))
         self.status_bar.addWidget(self.lbl_rbw)
-        
+
         self.status_bar.addPermanentWidget(self.lbl_peak_status)
         self.status_bar.addPermanentWidget(self.lbl_fps)
 
@@ -736,10 +853,11 @@ class MainWindow(QMainWindow):
     # -----------------------------------------------------------------------
     def _wire_actions(self):
         self.recorder = Recorder(self)
-        
+        self.amplitude_logger = AmplitudeLogger()
+
         # Toolbar actions
         self.btn_run_stop.clicked.connect(self._toggle_run)
-        
+
         self.btn_clear_write.clicked.connect(self._update_trace_modes)
         self.btn_max_hold.clicked.connect(self._update_trace_modes)
         self.btn_min_hold.clicked.connect(self._update_trace_modes)
@@ -747,9 +865,13 @@ class MainWindow(QMainWindow):
         self.btn_carriers.toggled.connect(
                 self._toggle_carrier_detection
             )
-        
+
         self.btn_screenshot.clicked.connect(lambda: self.recorder.take_screenshot())
         self.btn_export_csv.clicked.connect(lambda: self.recorder.export_csv(self._last_frame))
+
+        # Amplitude logger actions
+        self.btn_logger.clicked.connect(self._on_logger_button_clicked)
+        self.btn_logger_plot.clicked.connect(self._on_logger_plot_clicked)
 
         # Marker actions
         self.spectrum_widget.markers_changed.connect(self._on_markers_changed)
@@ -776,7 +898,7 @@ class MainWindow(QMainWindow):
         mh = self.btn_max_hold.isChecked()
         mi = self.btn_min_hold.isChecked()
         av = self.btn_average.isChecked()
-        
+
         self.spectrum_widget.set_trace_mode(clear_write=cw)
         self.spectrum_widget.set_trace_mode(max_hold=mh)
         self.spectrum_widget.set_trace_mode(min_hold=mi)
@@ -800,7 +922,7 @@ class MainWindow(QMainWindow):
             f"Carrier Detection {'Enabled' if checked else 'Disabled'}",
             2500
         )
-        
+
     def _on_trace_marker_changed(self, _index=None):
         trace_name = self.trace_marker_combo.currentData()
         trace_button = {
@@ -863,7 +985,7 @@ class MainWindow(QMainWindow):
             "QMenu::item:selected { background-color: #0B353C; color: #8DEEFF; } "
             "QMenu::item:disabled { color: #737373; }"
         )
-        
+
         action_add_marker = QAction("Add Marker", self)
         action_del_marker = QAction("Clear Markers", self)
         action_center = QAction("Center Here", self)
@@ -871,26 +993,26 @@ class MainWindow(QMainWindow):
         marker_enabled = self.marker_selector_btn.current_marker_id() != 0
         action_add_marker.setEnabled(marker_enabled)
         action_peak.setEnabled(marker_enabled)
-        
+
         menu.addAction(action_add_marker)
         menu.addAction(action_del_marker)
         menu.addSeparator()
         menu.addAction(action_center)
         menu.addAction(action_peak)
         menu.addSeparator()
-        
+
         action_zoom_in = QAction("Zoom In (+)", self)
         action_zoom_in.triggered.connect(self.spectrum_widget.zoom_in)
         action_zoom_out = QAction("Zoom Out (-)", self)
         action_zoom_out.triggered.connect(self.spectrum_widget.zoom_out)
         action_reset_zoom = QAction("Reset Zoom (R)", self)
         action_reset_zoom.triggered.connect(self.spectrum_widget.reset_zoom)
-        
+
         menu.addAction(action_zoom_in)
         menu.addAction(action_zoom_out)
         menu.addAction(action_reset_zoom)
         menu.addSeparator()
-        
+
         action_screenshot = QAction("Screenshot", self)
         action_screenshot.triggered.connect(lambda: self.recorder.take_screenshot())
         menu.addAction(action_screenshot)
@@ -997,6 +1119,7 @@ class MainWindow(QMainWindow):
         self.btn_run_stop.setText("Start acquisition")
         self.lbl_device_status.setText("Device: Idle")
         self.backend.stop()
+        self._stop_logging()
 
     def _on_backend_status(self, status: str):
         if self._is_running or status != "Idle":
@@ -1010,6 +1133,7 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self.btn_run_stop.setChecked(False)
         self.btn_run_stop.setText("Start acquisition")
+        self._stop_logging()
 
     def _on_frame_ready(self, frame: SpectrumFrame):
         self._last_frame = frame
@@ -1019,6 +1143,9 @@ class MainWindow(QMainWindow):
         self.reference_level_spin.setSuffix(f" {unit}")
         self.spectrum_widget.update_frame(frame)
         self.waterfall_widget.update_frame(frame)
+
+        if self.amplitude_logger.is_active:
+            self.amplitude_logger.on_frame(frame)
 
         peaks = getattr(frame, "peaks_dbm", None) if unit == "dBm" else None
         if not peaks:
@@ -1042,10 +1169,15 @@ class MainWindow(QMainWindow):
         self.lbl_meas_chan_pwr.setText(f"{channel_power:.2f} {unit}")
         self.lbl_fft_size.setText(f"FFT Size: {frame.fft_size}")
         self.lbl_rbw.setText(f"RBW: {frame.rbw/1e3:.3f} kHz")
-        now = time.monotonic()  
+        now = time.monotonic()
         if self._last_frame_time is not None and now > self._last_frame_time:
             self.lbl_fps.setText(f"FPS: {1.0/(now-self._last_frame_time):.1f}")
         self._last_frame_time = now
+        now_table = time.monotonic()
+        if now_table - self._last_carrier_table_time >= 0.20:
+            self._last_carrier_table_time = now_table
+            self._update_carrier_table(frame)
+
     # -----------------------------------------------------------------------
     # Marker & Delta Logic
     # -----------------------------------------------------------------------
@@ -1116,7 +1248,7 @@ class MainWindow(QMainWindow):
 
         entry = state[mid]
         delta = entry.get("delta")
-        
+
         if delta:
             delta_info = {
                 "frequency": entry["frequency"],
@@ -1179,6 +1311,46 @@ class MainWindow(QMainWindow):
         finally:
             self.table_markers.blockSignals(False)
 
+    def _update_carrier_table(self, frame):
+        table = self.table_carriers
+        carriers = frame.carriers
+        calibrated = getattr(frame, "power_calibrated", False)
+        unit = getattr(frame, "amplitude_unit", "dBFS")
+
+        if unit != self._carrier_table_unit:
+            self._carrier_table_unit = unit
+            table.setHorizontalHeaderLabels(
+                ["ID", "Centre MHz", "OBW kHz", f"Power {unit}"]
+            )
+
+        table.setUpdatesEnabled(False)
+        try:
+            if table.rowCount() != len(carriers):
+                table.setRowCount(len(carriers))
+            for row, c in enumerate(carriers):
+                if calibrated and c.band_power_dbm is not None:
+                    power = c.band_power_dbm
+                else:
+                    power = c.band_power_dbfs
+                values = (
+                    c.label,
+                    f"{c.center_frequency / 1e6:.3f}",
+                    f"{c.occupied_bandwidth / 1e3:.1f}",
+                    f"{power:.2f}",
+                )
+                for col, text in enumerate(values):
+                    item = table.item(row, col)
+                    if item is None:
+                        item = QTableWidgetItem()
+                        item.setTextAlignment(
+                            Qt.AlignmentFlag.AlignRight
+                            | Qt.AlignmentFlag.AlignVCenter
+                        )
+                        table.setItem(row, col, item)
+                    item.setText(text)
+        finally:
+            table.setUpdatesEnabled(True)
+
     def _reference_level_changed(self):
         self.spectrum_widget.set_reference_level(
             self.reference_level_spin.value(),
@@ -1189,6 +1361,59 @@ class MainWindow(QMainWindow):
             self.reference_level_spin.value(),
         )
 
+    # -----------------------------------------------------------------------
+    # Amplitude Logger
+    # -----------------------------------------------------------------------
+    def _on_logger_button_clicked(self):
+        if self.amplitude_logger.is_active:
+            # Button was checked -> user clicked to turn logging OFF.
+            self._stop_logging()
+            return
+
+        # Button click checked it, but we only commit to logging once the
+        # setup dialog is accepted; otherwise revert the visual state.
+        self.btn_logger.setChecked(False)
+
+        if not self._is_running:
+            self.status_bar.showMessage(
+                "Start acquisition before starting the amplitude logger.", 5000
+            )
+            return
+
+        center_frequency_hz = self.center_freq_ctrl.value_hz()
+        span_hz = self.span_ctrl.value_hz()
+        dialog = LoggerSetupDialog(center_frequency_hz, span_hz, parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+
+        frequencies_hz = dialog.result_frequencies_hz()
+        if not frequencies_hz:
+            return
+
+        unit = self._current_unit
+        path = self.amplitude_logger.start(frequencies_hz, unit=unit)
+        self.btn_logger.setChecked(True)
+        self.lbl_logger_status.setText(f"Logging: ON -> {path.name}")
+        self._set_acquisition_controls_locked(True)
+        self.status_bar.showMessage(f"Amplitude logging started: {path}", 5000)
+
+    def _stop_logging(self):
+        if not self.amplitude_logger.is_active:
+            self.btn_logger.setChecked(False)
+            return
+        self.amplitude_logger.stop()
+        self.btn_logger.setChecked(False)
+        self.lbl_logger_status.setText("Logging: OFF")
+        self._set_acquisition_controls_locked(False)
+
+    def _set_acquisition_controls_locked(self, locked: bool):
+        for widget in self._acquisition_controls:
+            widget.setEnabled(not locked)
+
+    def _on_logger_plot_clicked(self):
+        dialog = LoggerPlotDialog(self.amplitude_logger, parent=self)
+        dialog.exec()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_panel_toggles()
@@ -1197,6 +1422,7 @@ class MainWindow(QMainWindow):
             self.delta_readout.move(self.width() - self.delta_readout.width() - 320, 100)
 
     def closeEvent(self, event):
+        self._stop_logging()
         self.backend.stop()
         super().closeEvent(event)
 
@@ -1204,14 +1430,11 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 def main():
     app = QApplication(sys.argv)
-    
-    # Custom stylesheet loading preserved (fallback to internal theme if missing)
-    try:
-        with open("assets/style.qss", "r") as f:
-            app.setStyleSheet(f.read())
-    except FileNotFoundError:
-        pass # The GUI establishes its own dark theme inside _apply_dark_theme()
 
+    # NOTE: the previous assets/style.qss load was removed. MainWindow now
+    # installs the theme on the QApplication itself (see _apply_dark_theme),
+    # so anything set here would be unconditionally overwritten a moment later
+    # and only served to hide the ordering dependency.
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
