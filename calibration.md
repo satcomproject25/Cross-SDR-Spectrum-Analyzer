@@ -26,21 +26,24 @@ that stored number. It is not a measurement of the physical LO or reference
 oscillator. Therefore, adding another `getFrequency()` call cannot reveal the
 true RF center.
 
-The implemented fix keeps three quantities separate:
+The application keeps three quantities separate:
 
 1. requested tuning frequency: sent to the hardware;
 2. driver frequency: the value returned by SoapySDR;
-3. calibrated display center: `driver frequency + frequency_axis_offset_hz`.
+3. calibrated display center: `driver_frequency - frequency_error_hz`.
 
-`backend/acquisition.py` now applies the third value only to the displayed
-frequency axis. It does not retune HackRF and it does not affect USRP. The
-observed `+22 kHz` display error is initially corrected with:
+`backend/acquisition.py` applies the correction only to the displayed frequency
+axis; it does not retune the HackRF. New HackRF entries use a fixed error plus a
+proportional oscillator term:
 
 ```json
-"frequency_axis_offset_hz": -22000.0
+"frequency_fixed_error_hz": -297.7,
+"frequency_ppm_error": 8.9304
 ```
 
-in `calibration.json`. Refine this approximate number using the procedure below.
+The sign convention is `observed error = displayed - reference`: a positive
+error means the display is high, so it is subtracted. Existing entries that only
+contain `frequency_axis_offset_hz` remain supported for compatibility.
 
 ## 2. Frequency calibration procedure
 
@@ -60,7 +63,8 @@ in `calibration.json`. Refine this approximate number using the procedure below.
 
 ### Measurements
 
-1. Temporarily set `frequency_axis_offset_hz` to `0.0` in `calibration.json`.
+1. Temporarily set the applicable frequency-calibration values to `0.0` in
+   `calibration.json`.
 2. Select HackRF, choose a sample rate, and use the smallest practical span.
 3. Set the generator to a known frequency inside that span, preferably 100 to
    300 kHz away from center.
@@ -106,10 +110,10 @@ observed_error_hz = fixed_error_hz + ppm * known_frequency_hz / 1,000,000
 ```
 
 The intercept estimates a fixed offset; the slope estimates ppm. The current
-configuration corrects only the fixed component. Do not hide a genuine clock
-error with one fixed number across a wide tuning range. Correct the reference
-clock or add a separately verified ppm correction through hardware/driver
-support when available.
+implementation applies both terms to the HackRF display axis. Do not hide a
+genuine clock error with one fixed number across a wide tuning range. Correct
+the reference clock when possible and verify the fitted ppm term against fresh
+measurements.
 
 ### Store the result
 
@@ -120,10 +124,15 @@ not given the same calibration:
 {
   "devices": {
     "HACKRF": {
-      "default": {"frequency_axis_offset_hz": 0.0, "power_offset_db": null},
+      "default": {
+        "frequency_fixed_error_hz": 0.0,
+        "frequency_ppm_error": 0.0,
+        "power_offset_db": null
+      },
       "serials": {
         "YOUR_SERIAL": {
-          "frequency_axis_offset_hz": -21875.0,
+          "frequency_fixed_error_hz": -297.7,
+          "frequency_ppm_error": 8.9304,
           "power_offset_db": null
         }
       }
@@ -155,6 +164,42 @@ There is no universal HackRF, USRP, or Pluto offset. Receiver gain, frequency, f
 sample rate, selected connector, cable loss, attenuator error, and individual
 hardware all change it.
 
+### Supported power-calibration entries
+
+The resolver accepts these schemas, in precedence order. Device `default`
+values are merged with a matching serial override before resolution.
+
+| Entry | Resolved offset |
+|---|---|
+| `power_vga_table` | Directly interpolates `offset_db` by live VGA gain. |
+| `power_base_offset_table` | Interpolates `base_offset_db` by center frequency, then subtracts live VGA gain. |
+| `power_base_offset_db` | Subtracts live VGA gain from one base offset. |
+| `power_offset_db` | Uses a legacy pre-resolved constant. |
+
+Use arrays of objects for the two table forms:
+
+```json
+"power_base_offset_table": [
+  {"freq_hz": 100000000, "base_offset_db": -11.6},
+  {"freq_hz": 1000000000, "base_offset_db": -13.3}
+]
+```
+
+```json
+"power_vga_table": [
+  {"vga_db": 20, "offset_db": -33.0},
+  {"vga_db": 40, "offset_db": -53.0}
+]
+```
+
+Interpolation is linear and clamps at the first or last measured point; it does
+not extrapolate a new slope. `power_cal_vga_min_db` and
+`power_cal_vga_max_db` can reject unmeasured gain settings. For HackRF, set
+`power_cal_lna_db` and `power_cal_amp_db` to the gain-chain values used while
+measuring; the application declines calibration if its fixed LNA/AMP setup does
+not match. `power_cal_sample_rate_hz`, pad loss, notes, and instrument details
+are useful provenance but are not currently enforced automatically.
+
 ### Tone calibration steps
 
 1. Choose the reference plane, normally the SDR input connector.
@@ -166,7 +211,8 @@ hardware all change it.
 
    Include directional coupler or splitter loss when used.
 3. Fix SDR model/serial, center frequency, sample rate, gain stages, bandwidth,
-   antenna port, and reference clock. Record every setting.
+   antenna port, and reference clock. For HackRF, record the fixed LNA/AMP
+   setup and each VGA setting. Record every setting.
 4. Put the CW tone on an FFT bin if practical and away from DC and band edges.
 5. Start at a safely low level. Confirm that the ADC and RF front end are not
    clipping and that the tone is well above the noise floor.
@@ -203,8 +249,11 @@ the same span, sample rate, FFT size, and window.
 
 The power display path is implemented as follows:
 
-1. `backend/controller.py` retains the raw dBFS traces and derives explicit
-   `*_dbm` traces and measurements using `dbm = dbfs + power_offset_db`.
+1. `backend/acquisition.py` loads and merges the device/default and serial
+   calibration, then resolves the live offset using frequency and gain where the
+   schema requires it. `backend/controller.py` retains the raw dBFS traces and
+   derives explicit `*_dbm` traces and measurements using
+   `dbm = dbfs + power_offset_db`.
 2. `backend/models.py` carries raw and calibrated values separately; legacy
    amplitude fields retain their dBFS meaning.
 3. The spectrum, waterfall, reference level, peak/noise/channel-power readouts,
