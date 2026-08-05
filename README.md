@@ -10,6 +10,8 @@ A desktop spectrum analyzer for receiving and displaying live RF signals with:
 The application continuously receives complex IQ samples from the selected
 source, calculates an FFT, and displays a live spectrum and waterfall. Existing
 analysis features include clear/write, max hold, min hold, averaging, peak
+measurements, adaptive carrier-region overlays, markers, delta markers,
+occupied bandwidth, and CSV export.
 measurements, markers, delta markers, occupied bandwidth, adaptive multi-carrier
 detection, and CSV export. The same pipeline is also served to a browser console
 through `run_web.py`.
@@ -18,9 +20,10 @@ bin. Six normal/delta markers can be attached to CW, Max hold, Min hold, or
 Average, with one trace selected for all markers at a time. Marker selection
 defaults to **None** so spectrum clicks cannot create markers accidentally.
 
-> **Amplitude units:** when `power_offset_db` is configured for the selected
-> device/serial, every trace, marker, waterfall, and measurement is displayed in
-> calibrated dBm. An uncalibrated device remains visibly labeled dBFS. See
+> **Amplitude units:** when calibration resolves a valid offset for the selected
+> device, serial, frequency, and gain, every trace, marker, waterfall, and
+> measurement is displayed in calibrated dBm. An uncalibrated device remains
+> visibly labeled dBFS. See
 > [Amplitude: dBFS and dBm](#amplitude-dbfs-and-dbm).
 
 ## Contents
@@ -102,7 +105,7 @@ python run.py
 Then:
 
 1. Leave **SIMULATOR** selected.
-2. Press **Run**.
+2. Press **Start acquisition**.
 3. Two nearby digital-carrier bands and a noise floor should appear.
 4. Enable **Max Hold**, **Min Hold**, and **Average**. The traces should separate
    because the simulated carrier levels change over time.
@@ -146,7 +149,7 @@ in front of it if traffic crosses an untrusted network.
 One browser owns the control lease at a time so two users cannot retune the
 single SDR simultaneously. Other connected browsers remain live viewers and can
 explicitly take control. The web console includes the spectrum, waterfall,
-traces, measurements, carrier overlays, six markers, delta markers, zoom/pan,
+trace holds, measurements, carrier overlays, six markers, delta markers, zoom/pan,
 PNG capture, and calibrated raw/dBm CSV export. The desktop application remains
 available through `python run.py`.
 
@@ -161,7 +164,8 @@ available through `python run.py`.
 | PyQt6 | Desktop interface and thread-safe signals |
 | pyqtgraph | Spectrum, waterfall, traces, and markers |
 | FastAPI and Uvicorn | Browser API, static UI, and campus web server |
-| WebSockets | Low-latency binary spectrum delivery |
+| `websockets` | Low-latency binary spectrum delivery |
+| `httpx` | Browser-service test client |
 
 ### Required SDR packages
 
@@ -175,7 +179,7 @@ available through `python run.py`.
 The recommended environment is Radioconda. From a Radioconda Prompt:
 
 ```powershell
-mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph soapysdr soapysdr-module-hackrf soapysdr-module-uhd soapysdr-module-plutosdr hackrf uhd libiio
+mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph fastapi uvicorn websockets httpx soapysdr soapysdr-module-hackrf soapysdr-module-uhd soapysdr-module-plutosdr hackrf uhd libiio
 ```
 
 Alternatively, create the supplied environment:
@@ -220,7 +224,7 @@ Then:
 3. Run `python run.py`.
 4. Select **HackRF**.
 5. Set center frequency, span, sample rate, and a moderate starting gain.
-6. Press **Run** and wait for the connected status.
+6. Press **Start acquisition** and wait for the connected status.
 7. Enable the signal generator at a safe low level.
 
 Placing a CW tone slightly away from the exact center frequency is useful
@@ -319,6 +323,11 @@ of being suppressed by direct arithmetic averaging of dB values. Hardware modes
 show only carriers physically present at their RF inputs; no simulator signal is
 mixed into live SDR samples.
 
+The **Carrier** toggle draws adaptive occupied-band regions on the live trace.
+The detector requires a sustained region above an estimated noise floor, then
+refines its edges against the unsmoothed spectrum. It is an occupancy aid, not
+a demodulator or a standards-based channel classifier.
+
 ### Markers
 
 - **None** is selected initially. While it is active, spectrum clicks, context
@@ -379,10 +388,10 @@ The right-side measurement panel currently reports:
 | Measurement | Current calculation |
 |---|---|
 | Peak Frequency | Frequency of the strongest live FFT bin |
-| Peak Amplitude | Calibrated amplitude of that bin in dBm |
+| Peak Amplitude | Amplitude of that bin in the active display unit (dBm when calibrated; otherwise dBFS) |
 | Noise Floor | Median amplitude of all displayed FFT bins |
 | Occupied Bandwidth | Frequency interval containing the middle 99% of displayed spectral power: 0.5% to 99.5% cumulative power |
-| Channel Power | Sum of linear power from every displayed FFT bin, converted to calibrated dBm |
+| Channel Power | Sum of linear power from every displayed FFT bin, in the active display unit |
 
 Important interpretation notes:
 
@@ -474,23 +483,28 @@ conversion changes with:
 - cable and attenuator loss
 - temperature and device variation
 
-A calibrated conversion has the form:
+A resolved calibration has the form:
 
 ```text
-input power (dBm) = measured level (dBFS) + calibration offset (dB)
+input power (dBm) = measured level (dBFS) + resolved calibration offset (dB)
 ```
 
-The offset must be measured using a known signal generator at the SDR input and
-stored for the relevant frequency, gain, sample rate, and RF path. The analyzer
-loads the device default and then any matching serial override. It preserves raw
-dBFS arrays and derives separate `*_dbm` traces, peaks, noise floor, and channel
-power. The spectrum, waterfall, reference control, marker labels/table,
-delta-marker absolute readouts, measurement panel, status peak, and calibrated
-CSV columns all use those dBm fields together.
+The calibration file supports a legacy fixed `power_offset_db`, a
+`power_base_offset_db` that is adjusted for the live HackRF VGA gain, a
+frequency-interpolated `power_base_offset_table`, or a direct
+`power_vga_table`. Tables clamp at their measured endpoints; the HackRF default
+also deliberately falls back to dBFS outside its characterized VGA range. See
+[the calibration guide](calibration.md) for the schema and measurement method.
 
-If `power_offset_db` is absent, `null`, non-numeric, or non-finite, the frame is
-marked uncalibrated and all displays remain consistently labeled dBFS. This
-prevents a unit rename from being mistaken for an absolute RF calibration.
+The analyzer loads the device default and then any matching serial override. It
+preserves raw dBFS arrays and derives separate `*_dbm` traces, peaks, noise
+floor, and channel power. The spectrum, waterfall, reference control, marker
+labels/table, delta-marker absolute readouts, measurement panel, status peak,
+and calibrated CSV columns all use those dBm fields together.
+
+If no valid offset can be resolved, the frame is marked uncalibrated and all
+displays remain consistently labeled dBFS. This prevents a unit rename from
+being mistaken for an absolute RF calibration.
 The simulator's `0.0` offset is a nominal software scale for exercising the
 complete dBm UI path; it does not represent power at a physical RF connector.
 
@@ -510,12 +524,16 @@ freqanalyzer/
 |-- backend/
 |   |-- acquisition.py        SoapySDR streaming and IQ simulator
 |   |-- controller.py         IQ-to-SpectrumFrame processing pipeline
+|   |-- calibration.py        Calibration file loader
+|   |-- power_calibration.py  Fixed, frequency, and VGA calibration resolver
+|   |-- device_profiles.py    Shared hardware limits for the desktop and web UI
 |   |-- device_profiles.py    Sample-rate, span, gain, and tuning limits
 |   |-- calibration.py        Frequency calibration file loader
 |   |-- power_calibration.py  dBFS-to-dBm offset schemas and lookup
 |   |-- carrier_detection.py  Adaptive multi-carrier detection engine
 |   |-- dsp.py                Window, FFT, frequency axis, and dBFS
 |   |-- trace.py              Live, max/min hold, and average traces
+|   |-- carrier_detection.py  Adaptive occupied-carrier region detector
 |   |-- peak.py               Peak detection
 |   |-- measurements.py       Spectrum measurements
 |   |-- models.py             Shared data structures
@@ -541,6 +559,14 @@ freqanalyzer/
 |       |-- app.js            Canvas spectrum, waterfall, markers, controls
 |       `-- styles.css        Instrument palette
 `-- tests/
+    |-- test_acquisition.py    Mock SDR and live simulator tests
+    |-- test_calibration.py    Calibration schema and interpolation tests
+    |-- test_carrier_detection.py Carrier-region detector tests
+    |-- test_gui.py            Device profiles and tabbed UI tests
+    |-- test_pipeline.py       DSP, tone, span, hold, and average tests
+    |-- test_recorder.py       Calibrated CSV export tests
+    |-- test_renderer.py       Auto-peak and multi-trace marker tests
+    `-- test_web.py            HTTP, WebSocket, and browser protocol tests
     |-- test_acquisition.py       Mock SDR and live simulator tests
     |-- test_calibration.py       Frequency and power offset lookup tests
     |-- test_carrier_detection.py Detection thresholds and edge-case tests
@@ -669,8 +695,9 @@ connected to the RF/antenna input—not a clock, trigger, or output connector.
 - FFT size is fixed at 4096.
 - Span is limited to the selected sample rate; wide sweeps across multiple LO
   tunings are not implemented.
-- Absolute dBm requires a valid `power_offset_db` for the exact device and RF
-  configuration; otherwise the application explicitly falls back to dBFS.
+- Absolute dBm requires a valid calibration resolved for the exact device, gain,
+  frequency, and RF configuration; otherwise the application explicitly falls
+  back to dBFS.
 - Channel power integrates the full displayed span.
 - This is an SDR-based analyzer, not a replacement for a calibrated laboratory
   spectrum analyzer or power meter.

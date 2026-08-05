@@ -12,6 +12,8 @@ SoapySDR DLLs and device modules are already on `PATH`.
 | NumPy | IQ arrays, FFT, holds, averages, and measurements |
 | PyQt6 | Desktop GUI and thread-safe frame signals |
 | pyqtgraph | Spectrum, traces, markers, and waterfall |
+| FastAPI + Uvicorn + websockets | Browser console and binary spectrum stream |
+| httpx | Browser-service test client |
 | SoapySDR (including Python bindings) | Common device discovery and RX streaming API |
 | soapysdr-module-hackrf + hackrf | HackRF One driver and diagnostic tools |
 | soapysdr-module-uhd + uhd | Ettus USRP driver, utilities, firmware, and FPGA support |
@@ -26,7 +28,7 @@ Radioconda already includes the SDR packages above. Install the GUI packages
 and make sure all required packages are present:
 
 ```powershell
-mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph soapysdr soapysdr-module-hackrf soapysdr-module-uhd soapysdr-module-plutosdr hackrf uhd libiio
+mamba install -c conda-forge -c ryanvolz numpy pyqt6 pyqtgraph fastapi uvicorn websockets httpx soapysdr soapysdr-module-hackrf soapysdr-module-uhd soapysdr-module-plutosdr hackrf uhd libiio
 ```
 
 Alternatively, create an isolated environment from the supplied file:
@@ -73,7 +75,7 @@ SoapySDR device modules and vendor libraries.
    SoapySDRUtil --find="driver=plutosdr"
    ```
 
-Finally verify that both modules load:
+Finally verify that the installed SoapySDR modules load:
 
 ```powershell
 SoapySDRUtil --info
@@ -130,10 +132,13 @@ Use attenuation between a signal generator and the SDR. Never assume a common
 safe input level across HackRF, Pluto, and USRP daughterboards; check the manual
 for the exact hardware and start at a low generator level.
 
-Displayed amplitude is calibrated **dBm** only when `calibration.json` supplies a
-finite `power_offset_db` for the selected device/default or serial. The raw dBFS
-values remain in every frame and CSV for auditability. Without a valid offset,
-all amplitude features consistently fall back to visibly labeled dBFS.
+Displayed amplitude is calibrated **dBm** only when `calibration.json` resolves
+a valid offset for the selected device/default or serial, live frequency, and
+gain. The file supports fixed, frequency-table, and HackRF VGA-table
+calibrations; its VGA-range guards intentionally reject uncharacterized gain
+settings. The raw dBFS values remain in every frame and CSV for auditability.
+Without a valid offset, all amplitude features consistently fall back to visibly
+labeled dBFS. See [calibration.md](calibration.md) before editing the file.
 
 ## Offline acceptance check
 
@@ -142,7 +147,7 @@ The automated DSP, acquisition, and simulator behavior can be tested without har
 ```powershell
 python -m unittest discover -s tests -v
 ```
-# Browser and campus-network operation
+## Browser and campus-network operation
 
 The browser console runs on the same computer that has the SDR drivers and
 hardware connection. For local use:
@@ -161,4 +166,5 @@ Allow TCP port 8000 through the host firewall only for the intended campus
 subnet, then browse to `http://HOST-IP:8000`. A static IP, DHCP reservation, or
 campus DNS record is recommended. The token protects analyzer control and live
 data, but plain HTTP does not encrypt it; use a campus-managed HTTPS reverse
-proxy when traffic leaves a trusted lab network.
+proxy when traffic leaves a trusted lab network. One browser controls the shared
+SDR at a time; viewers can use **Take control** to transfer that lease.
