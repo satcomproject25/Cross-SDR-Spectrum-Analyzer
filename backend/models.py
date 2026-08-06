@@ -73,12 +73,7 @@ class MeasurementData:
 
 @dataclass
 class SpectrumFrame:
-    """Flat frame contract consumed directly by the frontend.
-
-    The legacy amplitude fields remain raw dBFS for compatibility. Frontends
-    should use the explicitly named ``*_dbm`` fields when ``power_calibrated``
-    is true.
-    """
+    """Flat frame contract consumed directly by the frontend."""
 
     frequency: np.ndarray
     amplitude: np.ndarray
@@ -97,24 +92,21 @@ class SpectrumFrame:
     rbw: float
     frame_count: int
     device_name: str = ""
-    unit: str = "dBFS"  # or "dBm" if calibrated
     carriers: list = field(default_factory=list)
-    amplitude_dbfs: np.ndarray | None = None
-    max_hold_dbfs: np.ndarray | None = None
-    min_hold_dbfs: np.ndarray | None = None
-    average_dbfs: np.ndarray | None = None
-    amplitude_dbm: np.ndarray | None = None
-    max_hold_dbm: np.ndarray | None = None
-    min_hold_dbm: np.ndarray | None = None
-    average_dbm: np.ndarray | None = None
-    peaks_dbm: list[Peak] = field(default_factory=list)
-    noise_floor_dbfs: float | None = None
-    channel_power_dbfs: float | None = None
-    noise_floor_dbm: float | None = None
-    channel_power_dbm: float | None = None
-    power_offset_db: float | None = None
+
+    # dBFS -> dBm conversion for THIS frame's centre frequency and gain stage.
+    # A single scalar rather than a parallel dBm array: the offset is flat
+    # across a <=20 MHz span to well inside the calibration's own uncertainty,
+    # so duplicating a 4096-point float32 array every frame would cost Pi-class
+    # CPU and WebSocket bandwidth to carry information already present here.
+    power_offset_db: float = 0.0
+    # False when no calibration exists. The UI MUST keep every amplitude
+    # labelled dBFS in that case: displaying dBm off a zero offset is how
+    # confidently wrong measurements get into reports.
     power_calibrated: bool = False
-    amplitude_unit: str = "dBFS"
+    # False when the centre frequency sits outside the measured calibration
+    # span, i.e. the offset is a flat extrapolation rather than interpolated.
+    power_in_cal_range: bool = True
 
 
 # Legacy file-capture models are retained for old recordings and scripts.

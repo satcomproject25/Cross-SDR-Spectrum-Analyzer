@@ -57,6 +57,12 @@ class WebApplicationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("PLUTO", response.json())
 
+            script = client.get("/static/app.js").text
+            self.assertIn("waterfallHistory.width = binCount", script)
+            self.assertIn("state.viewStart - fullStart", script)
+            self.assertIn("traces[state.markerTrace] || traces.amplitude", script)
+            self.assertIn("traceControl.checked = true", script)
+
     def test_simulator_stream_reaches_websocket_as_binary_float32(self):
         coordinator = AnalyzerCoordinator()
         with TestClient(create_app(coordinator, access_token="")) as client:

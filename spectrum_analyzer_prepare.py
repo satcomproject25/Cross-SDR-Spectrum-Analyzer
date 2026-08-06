@@ -257,7 +257,12 @@ echo "  ================================================"
 echo ""
 
 # Start server in background, capture PID
-"__ENV_DIR__/bin/python" run.py --headless &
+# Run web_run.py directly -- same as running python web_run.py manually
+if [[ -f "__INSTALL_DIR__/web_run.py" ]]; then
+    "__ENV_DIR__/bin/python" "__INSTALL_DIR__/web_run.py" &
+else
+    "__ENV_DIR__/bin/python" "__INSTALL_DIR__/run.py" --headless &
+fi
 SERVER_PID=$!
 
 # Poll until server responds (max 60 seconds)
@@ -289,6 +294,7 @@ chmod +x "${INSTALL_DIR}/run_web.sh"
 
 ok "GUI launcher:  run_app.sh"
 ok "Web launcher:  run_web.sh  (auto-opens browser)"
+
 
 # Terminal command
 mkdir -p "${HOME}/.local/bin"
@@ -382,7 +388,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="PATH=${ENV_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="LD_LIBRARY_PATH=${ENV_DIR}/lib"
 Environment="QT_QPA_PLATFORM=offscreen"
-ExecStart=${ENV_DIR}/bin/python run.py --headless
+ExecStart=/bin/bash -c "if [ -f ${INSTALL_DIR}/web_run.py ]; then exec ${ENV_DIR}/bin/python ${INSTALL_DIR}/web_run.py; else exec ${ENV_DIR}/bin/python ${INSTALL_DIR}/run.py --headless; fi"
 Restart=on-failure
 RestartSec=10
 
@@ -572,22 +578,23 @@ echo   Close this window to stop the server.
 echo  ================================================
 echo.
 
-:: Step 1 -- Launch browser opener as a detached background process.
-::   Uses ping as a 5-second delay (no timeout.exe needed), then polls
-::   localhost:8000 once per second until the server responds.
-::   start /min runs it in a minimized window that closes when done.
-start "" /min cmd /c "ping -n 6 127.0.0.1 >nul & powershell -NoProfile -Command ""for(`$i=0;`$i -lt 120;`$i++){try{(New-Object Net.WebClient).DownloadString('http://localhost:8000')|Out-Null;Start-Process 'http://localhost:8000';break}catch{Start-Sleep 1}}"" "
+:: Open browser after 8 seconds (background, detached)
+start "" /min cmd /c "ping -n 9 127.0.0.1 >nul && start http://localhost:8000"
 
-:: Step 2 -- Start server in foreground.
-::   Server logs appear in this window.
-::   Closing this window stops the server.
-echo  Starting server...
+:: Run web_run.py directly -- same as running "python web_run.py" manually
+:: This avoids loading PyQt6 and prevents Qt warnings entirely
+echo  Starting server (logs appear below)...
 echo.
-"$EnvDir\python.exe" run.py --headless
+if exist "$InstallDir\web_run.py" (
+    "$EnvDir\python.exe" "$InstallDir\web_run.py"
+) else (
+    "$EnvDir\python.exe" "$InstallDir\run.py" --headless
+)
 "@ | Set-Content -Path $WebLauncherBat -Encoding ASCII
 
 Write-OK "GUI launcher:  run_app.bat"
 Write-OK "Web launcher:  run_web.bat  (auto-opens browser)"
+
 
 # Add env to user PATH (permanent, no admin needed)
 $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -653,7 +660,7 @@ function Install-Driver-Inline($folder, $name, $url) {
     $p = Join-Path $ScriptDir $folder
     Write-Info "  Installing: $name"
     if (-not (Test-Path $p)) { Write-Warn "  Not found in bundle. Install manually: $url"; return }
-    $infs = Get-ChildItem -Path $p -Filter "*.inf" -Recurse
+    $infs = @(Get-ChildItem -Path $p -Filter "*.inf" -Recurse)
     if ($infs.Count -eq 0) { Write-Warn "  No .inf files found. Install manually: $url"; return }
     foreach ($inf in $infs) {
         Write-Info "  -> $($inf.Name)"
@@ -753,7 +760,7 @@ function Install-HardwareDriver($driverFolder, $hardwareName, $manualUrl) {
         return
     }
 
-    $infFiles = Get-ChildItem -Path $driverPath -Filter "*.inf" -Recurse
+    $infFiles = @(Get-ChildItem -Path $driverPath -Filter "*.inf" -Recurse)
     if ($infFiles.Count -eq 0) {
         Write-Warn "  No .inf files found in $driverFolder"
         Write-Warn "  Install manually: $manualUrl"
@@ -1713,6 +1720,55 @@ def _extract_all_drivers(tmp_env: Path, work: Path, target_os: str) -> None:
             ok(f"{display_name}: {inf_count} .inf files -> drivers/{subfolder}/")
 
 
+def _patch_web_run(app_dest: Path) -> None:
+    """
+    Inject Qt headless environment variables at the very top of web_run.py.
+
+    Why this is needed:
+        web_run.py imports from backend/ and frontend/ which transitively
+        import PyQt6. Qt reads QT_QPA_PLATFORM at the moment the first
+        Qt module is imported -- BEFORE the calling process has a chance
+        to set any env vars. So setting them in run_web.bat is too late.
+
+        Injecting at the top of web_run.py ensures they are set in the
+        Python process itself, before any import that touches Qt.
+
+    What it suppresses:
+        - QFontDatabase: Cannot find font directory
+        - This plugin does not support propagateSizeHints()
+        - qt.qpa.* debug spam
+    """
+    web_run = app_dest / "web_run.py"
+    if not web_run.exists():
+        warn("web_run.py not found in app source -- skipping Qt patch")
+        return
+
+    original = web_run.read_text(encoding="utf-8")
+
+    # Idempotent -- do not patch twice
+    if "Qt headless env setup (injected by Spectrum_Analyzer.py)" in original:
+        ok("web_run.py: already patched, skipping")
+        return
+
+    patch = (
+        "# ---- Qt headless env setup (injected by Spectrum_Analyzer.py) ------\n"
+        "# Must run before ANY import that touches PyQt6 / Qt.\n"
+        "import os as _os, sys as _sys\n"
+        "_os.environ.setdefault(\'QT_QPA_PLATFORM\', \'offscreen\')\n"
+        "_os.environ.setdefault(\'QT_LOGGING_RULES\',\n"
+        "    \'*.debug=false;qt.qpa.fonts=false;qt.qpa.plugin=false\')\n"
+        "if _sys.platform == \'win32\':\n"
+        "    _windir = _os.environ.get(\'WINDIR\', \'C:\\\\Windows\')\n"
+        "    _os.environ.setdefault(\'QT_QPA_FONTDIR\',\n"
+        "        _os.path.join(_windir, \'Fonts\'))\n"
+        "# ---- end Qt setup ---------------------------------------------------\n"
+        "\n"
+    )
+
+    web_run.write_text(patch + original, encoding="utf-8")
+    ok("web_run.py: Qt headless env vars injected at top")
+
+
 def cmd_prepare(args) -> None:
     target_os = "windows" if sys.platform == "win32" else "linux"
     arch      = args.arch
@@ -1821,6 +1877,7 @@ def cmd_prepare(args) -> None:
     for f in app_dest.glob("Spectrum_Analyzer.py"):
         f.unlink()
     ok(f"Application source copied ({sum(1 for _ in app_dest.rglob('*'))} files)")
+    _patch_web_run(app_dest)
 
     # -- Assemble the ZIP ------------------------------------------------------
     section("Assembling bundle ZIP")

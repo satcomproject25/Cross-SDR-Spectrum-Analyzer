@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from backend.carrier_detection_temp import CarrierDetectionEngine
+from backend.carrier_detection import CarrierDetectionEngine
 
 
 class CarrierDetectionEngineTests(unittest.TestCase):

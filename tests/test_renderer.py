@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from backend.carrier_detection_temp import CarrierRegion
+from backend.carrier_detection import CarrierRegion
 from frontend.renderer import (
     COLOR_AUTO_PEAK,
     COLOR_AVERAGE,

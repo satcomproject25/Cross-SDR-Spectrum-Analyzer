@@ -1,42 +1,27 @@
 """Stateful DSP pipeline that turns IQ blocks into frontend frames."""
 
-import math
 import time
-import numpy as np
 
 from .dsp import DSPEngine
 from .measurements import MeasurementEngine
-from .models import IQFrame, Peak, SpectrumFrame
+from .models import IQFrame, SpectrumFrame
 from .peak import PeakEngine
-from .carrier_detection import CarrierDetectionEngine
-from .carrier_measure import CarrierMeasurementEngine, CarrierTracker
+from .carrier_detection import CarrierDetectionEngine   
+from .calibration import PowerCalibration
 from .trace import TraceEngine
-from .power_calibration import dbfs_to_dbm
 
 
 class AnalyzerPipeline:
-    def __init__(
-        self,
-        config,
-        device_name: str = "",
-        power_offset_db: float | None = None,
-    ):
+    def __init__(self, config, device_name: str = "", serial: str = ""):
         self.config = config
         self.device_name = device_name
-        try:
-            offset = float(power_offset_db) if power_offset_db is not None else None
-        except (TypeError, ValueError):
-            offset = None
-        self.power_offset_db = (
-            offset if offset is not None and math.isfinite(offset) else None
-        )
+        self.serial = serial
+        self.power_cal = PowerCalibration.for_device(config.device_type, serial)
         self.dsp = DSPEngine(config.fft_size)
         self.traces = TraceEngine()
         self.measurements = MeasurementEngine()
         self.peaks = PeakEngine()
         self.carrier_detector = CarrierDetectionEngine()
-        self.carrier_measure = CarrierMeasurementEngine()
-        self.carrier_tracker = CarrierTracker()
         self.frame_count = 0
 
     def process(self, samples) -> SpectrumFrame:
@@ -47,64 +32,20 @@ class AnalyzerPipeline:
             center_frequency=self.config.center_frequency,
         )
         spectrum = self.dsp.process(iq_frame, self.config.span)
-
         traces = self.traces.update(spectrum)
-        regions = self.carrier_detector.detect(traces.live)
-        measured = self.carrier_measure.measure(
-            regions, traces.live, traces.frequency, spectrum.rbw
+        carriers = self.carrier_detector.detect(
+        traces.live
         )
-        carriers = self.carrier_tracker.update(measured, spectrum.rbw)
         measurements = self.measurements.update(traces)
         peaks = self.peaks.find(traces)
-
-        calibrated = self.power_offset_db is not None
-        if calibrated:
-            offset = self.power_offset_db
-            amplitude_dbm = np.asarray(dbfs_to_dbm(traces.live, offset)).copy()
-            max_hold_dbm = np.asarray(dbfs_to_dbm(traces.max_hold, offset)).copy()
-            min_hold_dbm = np.asarray(dbfs_to_dbm(traces.min_hold, offset)).copy()
-            average_dbm = np.asarray(dbfs_to_dbm(traces.average, offset)).copy()
-            peaks_dbm = [
-                Peak(
-                    peak.id,
-                    peak.frequency,
-                    float(dbfs_to_dbm(peak.amplitude, offset)),
-                    peak.bin_index,
-                )
-                for peak in peaks
-            ]
-            noise_floor_dbm = float(
-                dbfs_to_dbm(measurements.noise_floor, offset)
-            )
-            channel_power_dbm = float(
-                dbfs_to_dbm(measurements.channel_power, offset)
-            )
-        else:
-            amplitude_dbm = None
-            max_hold_dbm = None
-            min_hold_dbm = None
-            average_dbm = None
-            peaks_dbm = []
-            noise_floor_dbm = None
-            channel_power_dbm = None
-
-        for track in carriers:
-            track.band_power_dbfs = track.band_power
-            track.band_power_dbm = (
-                track.band_power + self.power_offset_db
-                if self.power_offset_db is not None else None
-            )
-            
-        if self.frame_count % 30 == 0 and carriers:
-            print(type(carriers[0]).__name__)
-        
         self.frame_count += 1
-        
-        if self.frame_count % 30 == 0:
-            for c in carriers:
-                print(f"{c.label} {c.center_frequency/1e6:.3f} MHz "
-                      f"{c.occupied_bandwidth/1e3:.1f} kHz {c.band_power_dbfs:.2f}")
-        
+
+        # Traces stay in raw dBFS. The conversion travels alongside them so the
+        # raw measurement and the calibration applied to it remain separable
+        # and auditable all the way out to the CSV export.
+        power_offset = self.power_cal.offset_db(
+            spectrum.center_frequency, float(self.config.gain)
+        )
         return SpectrumFrame(
             frequency=traces.frequency,
             amplitude=traces.live,
@@ -122,28 +63,25 @@ class AnalyzerPipeline:
             fft_size=spectrum.fft_size,
             rbw=spectrum.rbw,
             frame_count=traces.frame_count,
-            device_name=self.device_name,
-            unit="dBm" if calibrated else "dBFS",
+            device_name=self.device_name,   
             carriers=carriers,
-            amplitude_dbfs=traces.live,
-            max_hold_dbfs=traces.max_hold,
-            min_hold_dbfs=traces.min_hold,
-            average_dbfs=traces.average,
-            amplitude_dbm=amplitude_dbm,
-            max_hold_dbm=max_hold_dbm,
-            min_hold_dbm=min_hold_dbm,
-            average_dbm=average_dbm,
-            peaks_dbm=peaks_dbm,
-            noise_floor_dbfs=measurements.noise_floor,
-            channel_power_dbfs=measurements.channel_power,
-            noise_floor_dbm=noise_floor_dbm,
-            channel_power_dbm=channel_power_dbm,
-            power_offset_db=self.power_offset_db,
-            power_calibrated=calibrated,
-            amplitude_unit="dBm" if calibrated else "dBFS",
+            power_offset_db=power_offset,
+            power_calibrated=self.power_cal.valid,
+            power_in_cal_range=self.power_cal.in_range(spectrum.center_frequency),
         )
 
     def clear_traces(self):
         self.traces.clear()
-        self.traces.clear()
-        self.carrier_tracker.reset()
+
+    def reload_calibration(self, serial: str | None = None):
+        """Re-read calibration.json without tearing down the DSP state.
+
+        Note that the frequency axis offset is applied once at tune time inside
+        the acquisition layer, so this refreshes POWER calibration only. A
+        frequency recalibration still needs the stream restarted.
+        """
+        if serial is not None:
+            self.serial = serial
+        self.power_cal = PowerCalibration.for_device(
+            self.config.device_type, self.serial
+        )

@@ -1,7 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import numpy as np
-from backend.carrier_detection_temp import CarrierDetectionEngine
+from backend.carrier_detection import CarrierDetectionEngine
 from backend.carrier_tracking import CarrierTracker
 
 FFT, FS, FC = 4096, 20e6, 2440e6

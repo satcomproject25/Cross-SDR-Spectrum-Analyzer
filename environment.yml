@@ -18,3 +18,4 @@ dependencies:
   - hackrf
   - uhd
   - libiio
+  - openpyxl>=3.1

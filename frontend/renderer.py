@@ -7,10 +7,9 @@ Owner: Developer B (Frontend/GUI)
 
 import numpy as np
 import pyqtgraph as pg
+from pyqtgraph import FillBetweenItem
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
-
-from .amplitude import amplitude_unit, trace_amplitude
 
 
 # ----------------------------------------------------------------------------
@@ -23,9 +22,7 @@ COLOR_MIN_HOLD    = "#3399FF"
 COLOR_AVERAGE     = "#FFD60A"
 COLOR_AXIS_TEXT   = "#CCCCCC"
 COLOR_AUTO_PEAK   = "#FF3B30"
-COLOR_CARRIER     = "#5FD791"
 TRACE_WIDTH = 1.6
-LEFT_AXIS_WIDTH = 58
 
 MARKER_TRACE_FIELDS = {
     "cw": "amplitude",
@@ -67,7 +64,9 @@ class SpectrumWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._amplitude_unit = "dBm"
+        # Amplitude unit state must exist before _build_plot() writes the axis.
+        self._amp_offset_db = 0.0
+        self._amp_unit = "dBFS"
         self._build_plot()
         self._init_traces()
         self._init_auto_peak_marker()
@@ -93,13 +92,12 @@ class SpectrumWidget(QWidget):
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setLabel("bottom", "Frequency", units="Hz",
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
-        pi.setLabel("left", "Amplitude", units=self._amplitude_unit,
+        pi.setLabel("left", "Amplitude", units=self._amp_unit,
                     **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"})
         for axis_name in ("bottom", "left"):
             axis = pi.getAxis(axis_name)
             axis.setTextPen(COLOR_AXIS_TEXT)
             axis.setPen("#666666")
-        pi.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
         self.plot_widget.setYRange(-120, 0)
 
         # Drag-to-zoom: left-click-drag draws a box, release zooms in
@@ -122,8 +120,12 @@ class SpectrumWidget(QWidget):
         self.curve_max_hold.setVisible(False)
         self.curve_min_hold.setVisible(False)
         self.curve_average.setVisible(False)
-        # Reuse region items instead of allocating curves on every FFT frame.
-        self._carrier_regions = []
+        # --------------------------------------------------
+        # Carrier overlay
+        # --------------------------------------------------
+
+        self._carrier_fill_items = []
+
         self._carrier_show = True
 
     def _init_auto_peak_marker(self):
@@ -310,9 +312,7 @@ class SpectrumWidget(QWidget):
 
     def _place_marker(self, mid: int, freq: float, amp: float):
         color = MARKER_COLORS[mid]
-        label_text = (
-            f"M{mid}\n{freq/1e6:.3f} MHz\n{amp:.1f} {self._amplitude_unit}"
-        )
+        label_text = f"M{mid}\n{freq/1e6:.3f} MHz\n{amp:.1f} {self._amp_unit}"
 
         if mid not in self._markers:
             target = pg.TargetItem(
@@ -359,7 +359,7 @@ class SpectrumWidget(QWidget):
         pos = target.pos()
         color = MARKER_COLORS[mid]
         target.setLabel(
-            f"M{mid}\n{pos.x()/1e6:.3f} MHz\n{pos.y():.1f} {self._amplitude_unit}",
+            f"M{mid}\n{pos.x()/1e6:.3f} MHz\n{pos.y():.1f} {self._amp_unit}",
             {"color": color, "fill": (0, 0, 0, 180)}
         )
 
@@ -442,7 +442,7 @@ class SpectrumWidget(QWidget):
         delta_f = d_freq - p_pos.x()
         delta_a = d_amp  - p_pos.y()
         return (f"M{mid}{DELTA_SYMBOL}\n"
-                f"{d_freq/1e6:.3f} MHz  {d_amp:.1f} {self._amplitude_unit}\n"
+                f"{d_freq/1e6:.3f} MHz  {d_amp:.1f} {self._amp_unit}\n"
                 f"{DELTA_SYMBOL}f: {delta_f/1e6:+.3f} MHz\n"
                 f"{DELTA_SYMBOL}A: {delta_a:+.1f} dB")
 
@@ -496,63 +496,77 @@ class SpectrumWidget(QWidget):
             self.curve_average.setVisible(average)
 
     def _clear_carriers(self):
-        for region in self._carrier_regions:
-            region.hide()
 
-    def _new_carrier_region(self):
-        region = pg.LinearRegionItem(
-            values=(0.0, 0.0),
-            movable=False,
-            brush=pg.mkBrush(95, 215, 145, 110),
-            pen=pg.mkPen(COLOR_CARRIER, width=1.0),
-        )
-        region.setZValue(-5)
-        region.hide()
-        self.plot_widget.addItem(region)
-        self._carrier_regions.append(region)
-        return region
+        for item in self._carrier_fill_items:
+            self.plot_widget.removeItem(item)
 
+        self._carrier_fill_items.clear()
+    
     def _draw_carriers(self, frame):
+
         if not self._carrier_show:
-            self._clear_carriers()
             return
 
-        frequency = np.asarray(frame.frequency)
-        carriers = getattr(frame, "carriers", []) or []
-        visible_count = 0
-        for carrier in carriers:
-            left = int(carrier.left_bin)
-            right = int(carrier.right_bin)
-            if left < 0 or right >= frequency.size or right <= left:
-                continue
-            if visible_count == len(self._carrier_regions):
-                self._new_carrier_region()
-            region = self._carrier_regions[visible_count]
-            region.setRegion((float(frequency[left]), float(frequency[right])))
-            region.show()
-            visible_count += 1
+        self._clear_carriers()
 
-        for region in self._carrier_regions[visible_count:]:
-            region.hide()
+        if not frame.carriers:
+            return
+
+        freq = frame.frequency
+        amp = frame.amplitude
+
+        # Get current visible Y-axis range
+        y_min, y_max = self.plot_widget.getViewBox().viewRange()[1]
+
+        # Fill should span the entire visible plot
+        upper = np.full_like(amp, y_max)
+        lower = np.full_like(amp, y_min)
+
+        for carrier in frame.carriers:
+
+            left = carrier.left_bin
+            right = carrier.right_bin
+
+            x = freq[left:right + 1]
+
+            top = upper[left:right + 1]
+            bottom = lower[left:right + 1]
+
+            upper_curve = pg.PlotCurveItem(
+                x,
+                top,
+                pen=None,
+            )
+
+            lower_curve = pg.PlotCurveItem(
+                x,
+                bottom,
+                pen=None,
+            )
+
+            fill = FillBetweenItem(
+                upper_curve,
+                lower_curve,
+                brush=pg.mkBrush(95, 215, 145, 110)
+            )
+
+            self.plot_widget.addItem(fill)
+
+            self._carrier_fill_items.append(fill)
     # ------------------------------------------------------------------
     # Frame update (called per FFT frame from gui.py)
     # ------------------------------------------------------------------
     def update_frame(self, frame):
         self._last_frame = frame
         freq = frame.frequency
-        unit = amplitude_unit(frame)
-        if unit != self._amplitude_unit:
-            self._amplitude_unit = unit
-            self.plot_widget.getPlotItem().setLabel(
-                "left",
-                "Amplitude",
-                units=unit,
-                **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"},
-            )
-        amp = trace_amplitude(frame, "amplitude")
+
+        # Single point of conversion. The frame itself stays raw dBFS for the
+        # CSV exporter; only what is drawn is shifted.
+        shift = self._amp_offset_db
+        amp = frame.amplitude + shift if shift else frame.amplitude
         self._last_frequency = freq
         self._trace_amplitudes = {
-            name: trace_amplitude(frame, field)
+            name: (getattr(frame, field) + shift if shift else getattr(frame, field))
             for name, field in MARKER_TRACE_FIELDS.items()
         }
         self._last_amplitude = self._trace_amplitudes[self._marker_trace]
@@ -579,11 +593,11 @@ class SpectrumWidget(QWidget):
 
         if self.show_clear_write:
             self.curve_clear_write.setData(freq, amp)
-        if self.show_max_hold:
+        if self.show_max_hold and frame.max_hold is not None:
             self.curve_max_hold.setData(freq, self._trace_amplitudes["max_hold"])
-        if self.show_min_hold:
+        if self.show_min_hold and frame.min_hold is not None:
             self.curve_min_hold.setData(freq, self._trace_amplitudes["min_hold"])
-        if self.show_average:
+        if self.show_average and frame.average is not None:
             self.curve_average.setData(freq, self._trace_amplitudes["average"])
         self._draw_carriers(frame)
         if self._markers:
@@ -602,11 +616,29 @@ class SpectrumWidget(QWidget):
     def reset_zoom(self):
         self.plot_widget.getViewBox().autoRange()
 
+    def set_amplitude_calibration(self, offset_db: float = 0.0, unit: str = "dBFS"):
+        """Shift every displayed amplitude by offset_db and relabel the axis.
+
+        Applied here, at the single point where data reaches the plot, so the
+        axis, the traces, the auto-peak marker and every marker label move
+        together. Delta readouts are unaffected by construction: the offset
+        cancels in a difference, which is why they stay in plain dB.
+        """
+        self._amp_offset_db = float(offset_db)
+        self._amp_unit = unit
+        self.plot_widget.getPlotItem().setLabel(
+            "left", "Amplitude", units=unit,
+            **{"color": COLOR_AXIS_TEXT, "font-size": "10pt"}
+        )
+        if self._last_frame is not None:
+            self.update_frame(self._last_frame)
+
     def set_reference_level(self, ref_dbm: float, span_db: float = 120):
         self.plot_widget.setYRange(ref_dbm - span_db, ref_dbm)
 
     def set_carrier_visibility(self, visible):
-        self._carrier_show = bool(visible)
+
+        self._carrier_show = visible
 
         if not visible:
             self._clear_carriers()

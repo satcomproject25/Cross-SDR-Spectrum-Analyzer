@@ -37,6 +37,7 @@ from frontend.waterfall import WaterfallWidget
 from frontend.recorder import Recorder
 from frontend.freq_control import FrequencyControl
 from frontend.marker_dropdown import MarkerSelectorButton
+from frontend.calibration_panel import CalibrationPanel
 from PyQt6.QtWidgets import QAbstractSpinBox
 from frontend.theme import install_dark_palette, DOCK_QSS_PATCH
 from frontend.dock_titlebar import attach_dock_titlebar, wrap_dock_content
@@ -195,6 +196,7 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self._last_frame = None
         self._last_frame_time = None
+        self._amp_cal_state = None
         self._last_carrier_table_time = 0.0
         self._carrier_table_unit = "dBFS"
         self._min_hold_was_enabled = False
@@ -733,9 +735,17 @@ class MainWindow(QMainWindow):
         lyt_mkrs.addWidget(self.table_markers)
         markers_layout.addWidget(self.grp_mkrs, 1)
 
+        # Calibration tab
+        self.calibration_panel = CalibrationPanel(
+            self,
+            device_info=lambda: (self.sdr_type_combo.currentData() or "HACKRF", ""),
+            on_applied=self._calibration_applied,
+        )
+
         tabs.addTab(measurements_tab, "Measure")
         tabs.addTab(traces_tab, "Traces")
         tabs.addTab(markers_tab, "Markers")
+        tabs.addTab(self.calibration_panel, "Calibrate")
         self.analysis_tabs = tabs
 
         # Same treatment as the left dock: the QTabWidget alone does not paint
@@ -1161,12 +1171,27 @@ class MainWindow(QMainWindow):
             peak_amplitude = amplitude[index]
         noise_floor = scalar_amplitude(frame, "noise_floor")
         channel_power = scalar_amplitude(frame, "channel_power")
-        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} {unit}")
+        # Calibration state can change between frames (upload, device swap), so
+        # resolve it per frame rather than caching. The frame carries raw dBFS;
+        # the offset is applied here and, separately, inside the renderer.
+        calibrated = bool(getattr(frame, "power_calibrated", False))
+        offset = float(getattr(frame, "power_offset_db", 0.0)) if calibrated else 0.0
+        unit = "dBFS"
+        if calibrated:
+            # '*' marks a centre frequency outside the measured calibration span,
+            # where the offset is a flat extrapolation rather than interpolated.
+            unit = "dBm" if getattr(frame, "power_in_cal_range", True) else "dBm*"
+
+        if (offset, unit) != getattr(self, "_amp_cal_state", None):
+            self._amp_cal_state = (offset, unit)
+            self.spectrum_widget.set_amplitude_calibration(offset, unit)
+
+        self.lbl_peak_status.setText(f"Peak: {peak_amplitude + offset:.2f} {unit}")
         self.lbl_meas_peak_freq.setText(f"{peak_frequency/1e6:.6f} MHz")
-        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} {unit}")
-        self.lbl_meas_noise.setText(f"{noise_floor:.2f} {unit}")
+        self.lbl_meas_peak_amp.setText(f"{peak_amplitude + offset:.2f} {unit}")
+        self.lbl_meas_noise.setText(f"{frame.noise_floor + offset:.2f} {unit}")
         self.lbl_meas_obw.setText(f"{frame.bandwidth/1e3:.3f} kHz")
-        self.lbl_meas_chan_pwr.setText(f"{channel_power:.2f} {unit}")
+        self.lbl_meas_chan_pwr.setText(f"{frame.channel_power + offset:.2f} {unit}")
         self.lbl_fft_size.setText(f"FFT Size: {frame.fft_size}")
         self.lbl_rbw.setText(f"RBW: {frame.rbw/1e3:.3f} kHz")
         now = time.monotonic()
@@ -1350,6 +1375,13 @@ class MainWindow(QMainWindow):
                     item.setText(text)
         finally:
             table.setUpdatesEnabled(True)
+
+    def _calibration_applied(self):
+        """Restart acquisition so the new calibration is picked up immediately."""
+        self.statusBar().showMessage("Calibration updated — reloading device…", 5000)
+        if self._is_running:
+            self.backend.start(self._acquisition_config())
+
 
     def _reference_level_changed(self):
         self.spectrum_widget.set_reference_level(
