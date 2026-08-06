@@ -33,6 +33,11 @@
     || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
   localStorage.setItem("rf-analyzer-client-id", clientId);
 
+  // Amplitude logging always reads the running linear-power average trace.
+  // TraceEngine populates it on every frame regardless of whether the Average
+  // trace is switched on for display, so this needs no UI to stay valid.
+  const LOG_TRACE = "average";
+
   const state = {
     token: sessionStorage.getItem("rf-analyzer-token") || "",
     profiles: {},
@@ -43,7 +48,11 @@
     frameSequence: 0,
     renderedSequence: -1,
     running: false,
-    unit: "dBm",
+    unit: "dBFS",
+    requestedUnit: "dBFS",
+    unitOffsetDb: 0,
+    unitCalibrated: false,
+    unitWarning: "",
     reference: 0,
     yRange: 120,
     viewStart: null,
@@ -62,7 +71,6 @@
     logUnit: "dBFS",
     watchList: [],
     watchSequence: 1,
-    watchTrace: "average",
     watchAperture: 5,
     lastWatchPaint: 0,
     logNextDue: 0,
@@ -347,11 +355,11 @@
       traces[name] = new Float32Array(traceBytes, offset, header.bins);
       offset += header.bins * 4;
     }
+    applyUnits(header, traces);
     const previous = state.latestFrame;
     state.latestFrame = { header, traces };
     state.frameSequence += 1;
     state.receivedThisSecond += 1;
-    state.unit = header.unit;
     if (
       !previous
       || previous.header.frequency_start !== header.frequency_start
@@ -365,6 +373,120 @@
     updateCarriers(header);
     sampleAmplitudeLog(header, traces);
     $("emptyState").hidden = true;
+  }
+
+  // ------------------------------------------------------------------ units
+  // `requestedUnit` is the sticky operator choice; `unit` is what the numbers
+  // on screen actually are. They differ when dBm is requested on an
+  // uncalibrated frame, in which case dBFS values are shown -- never renamed
+  // ones. The wire format is raw dBFS, so the offset is applied exactly once,
+  // here, and everything downstream is already in display units.
+  const UNITS = { DBFS: "dBFS", DBM: "dBm", DBM_EXTRAPOLATED: "dBm*" };
+  const UNCALIBRATED_MESSAGE = "Measurements are not calibrated yet - showing dBFS."
+    + " Add a power calibration for this device and serial to display dBm.";
+  const EXTRAPOLATED_MESSAGE = "Centre frequency is outside the measured calibration"
+    + " span; the dBm offset is extrapolated (shown as dBm*).";
+
+  function resolveUnit(header) {
+    if (state.requestedUnit !== UNITS.DBM) {
+      return { unit: UNITS.DBFS, offsetDb: 0, calibrated: false, warning: "" };
+    }
+    const offset = header ? Number(header.power_offset_db) : NaN;
+    const calibrated = Boolean(header && header.power_calibrated) && Number.isFinite(offset);
+    if (!calibrated) {
+      return { unit: UNITS.DBFS, offsetDb: 0, calibrated: false, warning: UNCALIBRATED_MESSAGE };
+    }
+    const inRange = header.power_in_cal_range !== false;
+    return {
+      unit: inRange ? UNITS.DBM : UNITS.DBM_EXTRAPOLATED,
+      offsetDb: offset,
+      calibrated: true,
+      warning: inRange ? "" : EXTRAPOLATED_MESSAGE,
+    };
+  }
+
+  function applyUnits(header, traces) {
+    const resolution = resolveUnit(header);
+    state.unit = resolution.unit;
+    state.unitOffsetDb = resolution.offsetDb;
+    state.unitCalibrated = resolution.calibrated;
+    state.unitWarning = resolution.warning;
+
+    const shift = resolution.offsetDb;
+    if (!shift) return resolution;
+
+    // One pass over 4 x 4096 float32 (tens of microseconds) and only when
+    // calibrated -- negligible beside the canvas redraw, and it keeps every
+    // downstream consumer (traces, waterfall, markers, log, CSV) consistent.
+    for (const name of header.traces) {
+      const values = traces[name];
+      for (let i = 0; i < values.length; i += 1) values[i] += shift;
+    }
+    header.noise_floor += shift;
+    header.channel_power += shift;
+    for (const peak of header.peaks || []) peak.amplitude += shift;
+    for (const carrier of header.carriers || []) {
+      for (const key of ["power", "peak_power", "noise_floor"]) {
+        if (Number.isFinite(carrier[key])) carrier[key] += shift;
+      }
+    }
+    return resolution;
+  }
+
+  function paintUnitControls() {
+    const degraded = state.requestedUnit === UNITS.DBM && !state.unitCalibrated;
+    const button = $("unitButton");
+    if (button) {
+      button.textContent = state.requestedUnit;
+      button.setAttribute("aria-pressed", String(state.requestedUnit === UNITS.DBM));
+      button.classList.toggle("degraded", degraded);
+      button.classList.toggle("active", state.requestedUnit === UNITS.DBM && !degraded);
+    }
+    const warn = $("unitWarning");
+    if (warn) {
+      warn.textContent = state.unitWarning;
+      warn.hidden = !state.unitWarning;
+    }
+  }
+
+  function toggleUnits() {
+    state.requestedUnit = state.requestedUnit === UNITS.DBM ? UNITS.DBFS : UNITS.DBM;
+    if (state.latestFrame) {
+      // Re-resolve without re-shifting: traces already carry the OLD offset,
+      // so rebase them by the delta rather than applying the new offset raw.
+      const previousShift = state.unitOffsetDb;
+      const resolution = resolveUnit(state.latestFrame.header);
+      const delta = resolution.offsetDb - previousShift;
+      const { header, traces } = state.latestFrame;
+      if (delta) {
+        for (const name of header.traces) {
+          const values = traces[name];
+          for (let i = 0; i < values.length; i += 1) values[i] += delta;
+        }
+        header.noise_floor += delta;
+        header.channel_power += delta;
+        for (const peak of header.peaks || []) peak.amplitude += delta;
+        for (const carrier of header.carriers || []) {
+          for (const key of ["power", "peak_power", "noise_floor"]) {
+            if (Number.isFinite(carrier[key])) carrier[key] += delta;
+          }
+        }
+      }
+      state.unit = resolution.unit;
+      state.unitOffsetDb = resolution.offsetDb;
+      state.unitCalibrated = resolution.calibrated;
+      state.unitWarning = resolution.warning;
+      state.reference += delta;
+      $("referenceInput").value = String(state.reference);
+      clearWaterfall();
+      updateMeasurements(header, traces);
+      updateCarriers(header);
+      state.frameSequence += 1;
+    }
+    paintUnitControls();
+    if (state.requestedUnit === UNITS.DBM && !state.unitCalibrated) {
+      toast(UNCALIBRATED_MESSAGE, "error");
+    }
   }
 
   function resetView() {
@@ -388,7 +510,7 @@
         bin: index,
       };
     }
-    const unit = header.unit;
+    const unit = state.unit;
     if (peak) {
       $("peakAmplitude").textContent = `${peak.amplitude.toFixed(2)} ${unit}`;
       $("peakFrequency").textContent = formatFrequency(peak.frequency, 6);
@@ -400,8 +522,11 @@
     $("rbwValue").textContent = formatFrequency(header.rbw, 3);
     $("carrierCount").textContent = String((header.carriers || []).length);
     $("carrierPowerHeader").textContent = `Power (${unit})`;
-    $("calibrationStatus").textContent = header.power_calibrated ? "Calibrated dBm" : "Raw dBFS";
+    $("calibrationStatus").textContent = header.power_calibrated
+      ? `Available (${Number(header.power_offset_db).toFixed(2)} dB)`
+      : "Not calibrated";
     $("calibrationStatus").className = header.power_calibrated ? "good" : "warn";
+    paintUnitControls();
     $("referenceUnit").textContent = unit;
     $("scaleMax").textContent = `${state.reference} ${unit}`;
     $("scaleMid").textContent = String(state.reference - state.yRange / 2);
@@ -536,7 +661,7 @@
 
   function updateCarriers(header) {
     state.carriers = header.carriers || [];
-    state.carrierUnit = header.unit;
+    state.carrierUnit = state.unit;
     if (state.selectedCarrier != null
       && !state.carriers.some((carrier) => carrier.id === state.selectedCarrier)) {
       state.selectedCarrier = null;
@@ -557,7 +682,7 @@
       body.innerHTML = '<tr class="placeholder-row"><td colspan="4">No carriers detected</td></tr>';
       return;
     }
-    const unit = header.unit;
+    const unit = state.unit;
     const rows = carriers.map((carrier) => {
       const centre = (carrier.center_frequency / 1e6).toFixed(4);
       const obw = (carrier.occupied_bandwidth / 1e3).toFixed(1);
@@ -596,8 +721,9 @@
   function exportCarrierCsv() {
     if (!state.carriers.length) return toast("No carriers are currently detected", "error");
     const header = state.latestFrame.header;
-    const calibrated = header.power_calibrated && Number.isFinite(header.power_offset_db);
-    const unit = calibrated ? "dbm" : "dbfs";
+    // Column suffix follows the DISPLAYED unit, because the carrier values in
+    // state.carriers have already been shifted into it at frame receipt.
+    const unit = state.unit.startsWith("dBm") ? "dbm" : "dbfs";
     const columns = [
       "timestamp_utc", "carrier_id", "center_frequency_hz", "occupied_bandwidth_hz",
       `band_power_${unit}`, `peak_power_${unit}`, `noise_floor_${unit}`,
@@ -650,7 +776,7 @@
       }
 
       if (right - left > 26) {
-        const power = Number.isFinite(carrier.power) ? `  ${carrier.power.toFixed(1)} ${header.unit}` : "";
+        const power = Number.isFinite(carrier.power) ? `  ${carrier.power.toFixed(1)} ${state.unit}` : "";
         const label = `C${carrier.id}${power}`;
         spectrumCtx.font = "bold 9px Cascadia Mono, Consolas, monospace";
         const width = spectrumCtx.measureText(label).width + 8;
@@ -1194,9 +1320,9 @@
 
   function sampleAmplitudeLog(header, traces) {
     if (!state.watchList.length) return;
-    const values = traces[state.watchTrace] || traces.average || traces.amplitude;
+    const values = traces[LOG_TRACE];
     if (!values || !values.length) return;
-    state.logUnit = header.unit;
+    state.logUnit = state.unit;
 
     const levels = state.watchList.map((item) => {
       const level = sampleAt(header, values, item.frequency);
@@ -1249,13 +1375,12 @@
       state.logRows = [];
     }
     state.logIntervalMs = Number($("logIntervalSelect").value);
-    state.watchTrace = $("watchTrace").value;
     state.watchAperture = Number($("watchDetector").value);
     state.logColumns = state.watchList.map((item) => item.frequency);
     state.logging = true;
     state.logStartedAt = Date.now();
     state.logNextDue = state.logStartedAt;
-    for (const id of ["logIntervalSelect", "watchTrace", "watchDetector", "watchAddButton"]) {
+    for (const id of ["logIntervalSelect", "watchDetector", "watchAddButton"]) {
       $(id).disabled = true;
     }
     $("logToggleButton").textContent = "Stop logging";
@@ -1268,7 +1393,7 @@
   function stopLogging() {
     if (!state.logging) return;
     state.logging = false;
-    for (const id of ["logIntervalSelect", "watchTrace", "watchDetector", "watchAddButton"]) {
+    for (const id of ["logIntervalSelect", "watchDetector", "watchAddButton"]) {
       $(id).disabled = false;
     }
     $("logToggleButton").textContent = "Start logging";
@@ -1277,18 +1402,13 @@
     updateLoggerReadout();
   }
 
-  function logTraceLabel(key) {
-    return {
-      average: "average", amplitude: "clear_write",
-      max_hold: "max_hold", min_hold: "min_hold",
-    }[key] || key;
-  }
-
   function buildLogCsv() {
     // Timestamp plus one amplitude column per tracked frequency, nothing else.
     const unit = state.logUnit.toLowerCase();
     const columns = ["timestamp_utc"].concat(
-      state.logColumns.map((frequency) => `${(frequency / 1e6).toFixed(6)}MHz_${unit}`),
+      state.logColumns.map(
+        (frequency) => `${(frequency / 1e6).toFixed(6)}MHz_${LOG_TRACE}_${unit}`,
+      ),
     );
     const lines = [columns.join(",")];
     for (const row of state.logRows) {
@@ -1307,7 +1427,7 @@
       + `_${pad(started.getHours())}${pad(started.getMinutes())}${pad(started.getSeconds())}`;
     downloadBlob(
       new Blob([buildLogCsv()], { type: "text/csv" }),
-      `amplitude-log_${stamp}_${logTraceLabel(state.watchTrace)}.csv`,
+      `amplitude-log_${stamp}_${LOG_TRACE}.csv`,
     );
   }
 
@@ -1544,17 +1664,28 @@
   function exportCsv() {
     if (!state.latestFrame) return toast("No spectrum frame is available", "error");
     const { header, traces } = state.latestFrame;
-    const calibrated = header.power_calibrated && Number.isFinite(header.power_offset_db);
+    // Raw dBFS is ALWAYS written and dBm is added whenever an offset exists,
+    // regardless of the switch: a dBm-only file cannot survive a calibration
+    // later found to be wrong, while a file holding both can.
+    const offset = Number(header.power_offset_db);
+    const calibrated = Boolean(header.power_calibrated) && Number.isFinite(offset);
     const names = ["amplitude", "max_hold", "min_hold", "average"];
     const columns = ["frequency_hz", ...names.map((name) => `${name}_dbfs`)];
     if (calibrated) columns.push(...names.map((name) => `${name}_dbm`));
-    const lines = [columns.join(",")];
+    const lines = [
+      `# display_unit_requested=${state.requestedUnit}`,
+      `# power_calibrated=${calibrated}`,
+      `# power_offset_db=${calibrated ? offset : "null"}`,
+      `# power_in_cal_range=${header.power_in_cal_range !== false}`,
+      columns.join(","),
+    ];
+    // traces[] already carry state.unitOffsetDb; undo it to recover raw dBFS.
+    const shown = state.unitOffsetDb;
     for (let i = 0; i < header.bins; i += 1) {
       const frequency = header.frequency_start + i * header.frequency_step;
-      const display = names.map((name) => traces[name][i]);
-      const raw = calibrated ? display.map((value) => value - header.power_offset_db) : display;
+      const raw = names.map((name) => traces[name][i] - shown);
       const row = [frequency, ...raw];
-      if (calibrated) row.push(...display);
+      if (calibrated) row.push(...raw.map((value) => value + offset));
       lines.push(row.join(","));
     }
     downloadBlob(new Blob([lines.join("\n")], { type: "text/csv" }), `spectrum-${Date.now()}.csv`);
@@ -1596,6 +1727,7 @@
       $("gainOutput").value = `${$("gainInput").value} dB`;
       scheduleReconfigure();
     });
+    $("unitButton").addEventListener("click", toggleUnits);
     $("referenceInput").addEventListener("change", () => {
       state.reference = Number($("referenceInput").value);
       clearWaterfall();
@@ -1625,7 +1757,6 @@
     $("watchInput").addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); addWatchFrequency(); }
     });
-    $("watchTrace").addEventListener("change", () => { state.watchTrace = $("watchTrace").value; });
     $("watchDetector").addEventListener("change", () => {
       state.watchAperture = Number($("watchDetector").value);
     });

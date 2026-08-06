@@ -20,10 +20,12 @@ bin. Six normal/delta markers can be attached to CW, Max hold, Min hold, or
 Average, with one trace selected for all markers at a time. Marker selection
 defaults to **None** so spectrum clicks cannot create markers accidentally.
 
-> **Amplitude units:** when calibration resolves a valid offset for the selected
-> device, serial, frequency, and gain, every trace, marker, waterfall, and
-> measurement is displayed in calibrated dBm. An uncalibrated device remains
-> visibly labeled dBFS. See
+> **Amplitude units:** a single **dBFS / dBm** switch on the toolbar (`Ctrl+U`,
+> or *Amplitude units* in the browser console) selects the displayed unit for
+> every trace, marker, waterfall, measurement and carrier-table entry at once.
+> Selecting **dBm** on a device with no valid power calibration keeps the
+> readouts honestly in dBFS and raises a "not calibrated yet" warning; the
+> switch never renames an uncalibrated number. See
 > [Amplitude: dBFS and dBm](#amplitude-dbfs-and-dbm).
 
 ## Contents
@@ -354,11 +356,28 @@ The waterfall stores recent spectrum frames as rows. Frequency runs horizontally
 and older frames move through the time axis. Color represents calibrated dBm
 when available, with the same explicit dBFS fallback as the spectrum.
 
+### Amplitude logger
+
+The logger samples the **Average** trace and nothing else, in both the desktop
+application and the browser console. This is fixed, not a preference: a 10 s
+sample has to reflect the settled carrier level rather than one noisy FFT
+frame, and a max/min-hold reading would additionally depend on how long the
+hold had been running, which is not a measurement. `TraceEngine` populates the
+average on every frame whether or not the Average trace is switched on for
+display, so no UI is needed to keep this valid.
+
+Column labels and session markers record the trace name and the amplitude unit
+in force when the session started, so a file logged from the browser and one
+logged from the desktop are directly comparable.
+
 ### Screenshot and CSV
 
 - **Screenshot** saves an image of the application.
 - **Export CSV** saves auditable raw `*_dbfs` columns and adds calibrated
-  `*_dbm` columns when a power calibration is active.
+  `*_dbm` columns when a power calibration is active. This does **not** follow
+  the unit switch: both column sets are written whenever both exist, and a `#`
+  provenance preamble records the requested display unit, `power_calibrated`,
+  the applied `power_offset_db`, and `power_in_cal_range`.
 - Exports default to `SpectrumAnalyzer_Exports` in the current user's home
   directory, but the file dialog allows another location.
 
@@ -371,6 +390,7 @@ when available, with the same explicit dBFS fallback as the spectrum.
 | Ctrl+H | Toggle max hold |
 | Ctrl+L | Toggle min hold |
 | Ctrl+G | Toggle average |
+| Ctrl+U | Switch amplitude units (dBFS / dBm) |
 | Shift+M | Toggle delta marker |
 | S | Screenshot |
 | Ctrl+E | Export CSV |
@@ -496,15 +516,58 @@ frequency-interpolated `power_base_offset_table`, or a direct
 also deliberately falls back to dBFS outside its characterized VGA range. See
 [the calibration guide](calibration.md) for the schema and measurement method.
 
-The analyzer loads the device default and then any matching serial override. It
-preserves raw dBFS arrays and derives separate `*_dbm` traces, peaks, noise
-floor, and channel power. The spectrum, waterfall, reference control, marker
-labels/table, delta-marker absolute readouts, measurement panel, status peak,
-and calibrated CSV columns all use those dBm fields together.
+The analyzer loads the device default and then any matching serial override.
+Traces stay in raw dBFS all the way through the pipeline; the resolved offset
+travels beside them on every `SpectrumFrame` as `power_offset_db`, together
+with `power_calibrated` and `power_in_cal_range`.
 
-If no valid offset can be resolved, the frame is marked uncalibrated and all
-displays remain consistently labeled dBFS. This prevents a unit rename from
-being mistaken for an absolute RF calibration.
+### The unit switch
+
+The displayed unit is an **operator choice**, not a consequence of which fields
+the backend happened to populate. `frontend/units.py` holds two separate facts:
+
+- **requested** - what was selected with the switch. Sticky across frames,
+  devices, and restarts of acquisition.
+- **effective** - what the displayed numbers actually are, resolved per frame
+  against that frame's calibration state.
+
+| Requested | `power_calibrated` | `power_in_cal_range` | Displayed | Offset applied | Warning |
+|---|---|---|---|---|---|
+| dBFS | any | any | `dBFS` | none | none |
+| dBm | true | true | `dBm` | resolved offset | none |
+| dBm | true | false | `dBm*` | resolved offset | extrapolated outside measured span |
+| dBm | false | - | `dBFS` | none | **not calibrated yet** |
+
+A missing, `null`, non-numeric, `NaN`, or infinite offset all take the last
+row, as does a VGA gain outside `power_cal_vga_min_db` / `power_cal_vga_max_db`.
+
+When dBm is requested but cannot be honoured, the switch stays visibly latched
+in its dBm position and turns amber, the readouts remain labelled `dBFS`, and a
+status-bar message plus a dialog explain why. This is deliberate: seeing that
+dBm was requested *and refused* is strictly safer than either silently
+reverting the switch or silently relabelling a dBFS number.
+
+Delta-marker readouts stay in plain `dB` in both units - the offset cancels in
+a difference, so they are unit-invariant by construction.
+
+### What the switch changes
+
+Spectrum trace data and Y axis; waterfall intensity mapping and axis label;
+reference-level suffix; peak, noise-floor and channel-power readouts;
+status-bar peak; marker labels and the marker table; the Live Carriers power
+column and its header; amplitude-logger column headers; and every equivalent
+in the browser console.
+
+### What the switch deliberately does not change
+
+CSV export (see [Screenshot and CSV](#screenshot-and-csv)), and amplitude-log
+plots, which take their unit from the recorded file header rather than from the
+live switch.
+
+The waterfall history buffer also always stores raw dBFS; a unit change only
+translates the intensity window, so switching units neither rescales nor
+discards rows already on screen.
+
 The simulator's `0.0` offset is a nominal software scale for exercising the
 complete dBm UI path; it does not represent power at a physical RF connector.
 
@@ -547,7 +610,8 @@ freqanalyzer/
 |   |-- gui.py                Main window, controls, status, and backend bridge
 |   |-- renderer.py           Spectrum traces, carrier overlay, and markers
 |   |-- waterfall.py          Waterfall history display
-|   |-- amplitude.py          dBm/dBFS field selection for the display layer
+|   |-- units.py              Requested vs. effective amplitude unit resolution
+|   |-- amplitude.py          Trace/scalar field selection for the chosen unit
 |   |-- freq_control.py       Frequency/unit input widget
 |   |-- marker_dropdown.py    M1 through M6 selector
 |   `-- recorder.py           Screenshot and dBFS/dBm CSV export
@@ -565,6 +629,7 @@ freqanalyzer/
     |-- test_gui.py            Device profiles and tabbed UI tests
     |-- test_pipeline.py       DSP, tone, span, hold, and average tests
     |-- test_recorder.py       Calibrated CSV export tests
+    |-- test_units.py          Amplitude unit resolution and degradation tests
     |-- test_renderer.py       Auto-peak and multi-trace marker tests
     `-- test_web.py            HTTP, WebSocket, and browser protocol tests
     |-- test_acquisition.py       Mock SDR and live simulator tests

@@ -98,9 +98,16 @@
             <span>Reference level</span>
             <div class="input-with-unit">
               <input id="referenceInput" type="number" step="1" value="0">
-              <span id="referenceUnit" class="unit-suffix">dBm</span>
+              <span id="referenceUnit" class="unit-suffix">dBFS</span>
             </div>
           </label>
+          <label class="field">
+            <span>Amplitude units</span>
+            <button id="unitButton" class="button secondary full unit-switch" type="button"
+                    aria-pressed="false"
+                    title="Switch amplitude units between dBFS and dBm">dBFS</button>
+          </label>
+          <p id="unitWarning" class="cal-warning" hidden></p>
           <div id="profileDetail" class="profile-detail">Local IQ simulator · no SDR hardware required</div>
         </section>
 
@@ -131,15 +138,9 @@
           <ul id="watchList" class="watch-list">
             <li class="watch-empty">Add one or more frequencies to log.</li>
           </ul>
-          <label class="field">
-            <span>Source trace</span>
-            <select id="watchTrace" aria-label="Logged trace">
-              <option value="average" selected>Average</option>
-              <option value="amplitude">Clear write</option>
-              <option value="max_hold">Max hold</option>
-              <option value="min_hold">Min hold</option>
-            </select>
-          </label>
+          <p class="logger-note">
+            Logs the <strong>Average</strong> trace, matching the desktop application.
+          </p>
           <label class="field">
             <span>Detector</span>
             <select id="watchDetector" aria-label="Amplitude detector">

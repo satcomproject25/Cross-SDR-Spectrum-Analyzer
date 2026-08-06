@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QLabel, QComboBox, QDoubleSpinBox, QPushButton,
     QStatusBar, QSplitter, QSpinBox, QFrame, QSizePolicy,
     QDockWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QGroupBox, QMenu, QFormLayout, QGridLayout, QTabWidget
+    QGroupBox, QMenu, QFormLayout, QGridLayout, QTabWidget, QMessageBox
 )
 
 # --- Imported Modules (Assumes these exist in the project) ---
@@ -41,7 +41,8 @@ from frontend.calibration_panel import CalibrationPanel
 from PyQt6.QtWidgets import QAbstractSpinBox
 from frontend.theme import install_dark_palette, DOCK_QSS_PATCH
 from frontend.dock_titlebar import attach_dock_titlebar, wrap_dock_content
-from frontend.amplitude import amplitude_unit, scalar_amplitude, trace_amplitude
+from frontend.amplitude import peak_list, scalar_amplitude, trace_amplitude
+from frontend.units import DBFS, DBM, UnitState
 from frontend.logger_panel import LoggerSetupDialog, LoggerPlotDialog
 
 
@@ -111,7 +112,7 @@ class BackendBridge(QObject):
 class DeltaMarkerReadout(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._amplitude_unit = "dBm"
+        self._amplitude_unit = "dBFS"
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(240, 160)
@@ -196,11 +197,14 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self._last_frame = None
         self._last_frame_time = None
-        self._amp_cal_state = None
         self._last_carrier_table_time = 0.0
         self._carrier_table_unit = "dBFS"
         self._min_hold_was_enabled = False
-        self._current_unit = "dBFS"
+        # Single source of truth for the amplitude unit. Every widget that
+        # renders an amplitude reads from here; nothing recomputes it.
+        self.unit_state = UnitState(DBFS)
+        self._current_unit = DBFS
+        self._unit_warning_shown = ""
         # Base Layout Initialization
         self.setDockOptions(QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AnimatedDocks)
 
@@ -365,6 +369,21 @@ class MainWindow(QMainWindow):
                 background: #0B353C;
                 border-color: #33D6EE;
             }
+            QPushButton#UnitButton {
+                background: #171717;
+                border: 1px solid #484848;
+                font-weight: 600;
+            }
+            QPushButton#UnitButton:checked {
+                background: #123A4A;
+                border-color: #33D6EE;
+                color: #8DEEFF;
+            }
+            QPushButton#UnitButton[degraded="true"] {
+                background: #4A3512;
+                border-color: #E0A020;
+                color: #FFD38A;
+            }
             QPushButton#LoggerButton {
                 background: #171717;
                 border: 1px solid #484848;
@@ -466,6 +485,25 @@ class MainWindow(QMainWindow):
         self.lbl_profile_badge.setMinimumWidth(185)
         self._toolbar.addWidget(self.lbl_profile_badge)
 
+        unit_block = QWidget()
+        unit_layout = QVBoxLayout(unit_block)
+        unit_layout.setContentsMargins(0, 0, 12, 0)
+        unit_layout.setSpacing(2)
+        unit_label = QLabel("AMPLITUDE UNITS")
+        unit_label.setObjectName("SectionLabel")
+        # Checked == dBm REQUESTED, not dBm achieved. An uncalibrated device
+        # leaves the button latched and amber while the readouts stay honestly
+        # in dBFS, so the operator can see the request was made and refused.
+        self.btn_units = QPushButton("dBFS")
+        self.btn_units.setObjectName("UnitButton")
+        self.btn_units.setCheckable(True)
+        self.btn_units.setChecked(False)
+        self.btn_units.setMinimumWidth(96)
+        self.btn_units.setToolTip("Switch amplitude units between dBFS and dBm (Ctrl+U)")
+        unit_layout.addWidget(unit_label)
+        unit_layout.addWidget(self.btn_units)
+        self._toolbar.addWidget(unit_block)
+
         self.btn_run_stop = QPushButton("Start acquisition")
         self.btn_run_stop.setObjectName("RunButton")
         self.btn_run_stop.setCheckable(True)
@@ -515,7 +553,7 @@ class MainWindow(QMainWindow):
         self.reference_level_spin = QDoubleSpinBox()
         self.reference_level_spin.setRange(-150, 50)
         self.reference_level_spin.setValue(0)
-        self.reference_level_spin.setSuffix(" dBm")
+        self.reference_level_spin.setSuffix(f" {DBFS}")
 
         # Stepper buttons: keep them only where incremental nudging is the
         # normal interaction (Span sweeps, Reference-level trimming). Centre
@@ -604,10 +642,10 @@ class MainWindow(QMainWindow):
         lyt_meas = QFormLayout(grp_meas)
         lyt_meas.setVerticalSpacing(12)
         self.lbl_meas_peak_freq = QLabel("-- MHz")
-        self.lbl_meas_peak_amp  = QLabel("-- dBm")
-        self.lbl_meas_noise     = QLabel("-- dBm")
+        self.lbl_meas_peak_amp  = QLabel("-- dBFS")
+        self.lbl_meas_noise     = QLabel("-- dBFS")
         self.lbl_meas_obw       = QLabel("-- kHz")
-        self.lbl_meas_chan_pwr  = QLabel("-- dBm")
+        self.lbl_meas_chan_pwr  = QLabel("-- dBFS")
         for label in (
             self.lbl_meas_peak_freq,
             self.lbl_meas_peak_amp,
@@ -628,7 +666,7 @@ class MainWindow(QMainWindow):
         lyt_carriers = QVBoxLayout(grp_carriers)
         self.table_carriers = QTableWidget(0, 4)
         self.table_carriers.setHorizontalHeaderLabels(
-            ["ID", "Centre MHz", "OBW kHz", "Power dBFS"]
+            ["ID", "Centre MHz", "OBW kHz", f"Power {DBFS}"]
         )
         self.table_carriers.verticalHeader().setVisible(False)
         self.table_carriers.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -847,7 +885,7 @@ class MainWindow(QMainWindow):
         self.lbl_fft_size = QLabel("FFT Size: 2048")
         self.lbl_rbw = QLabel("RBW: 9.7 kHz")
         self.lbl_fps = QLabel("FPS: --")
-        self.lbl_peak_status = QLabel("Peak: -- dBm")
+        self.lbl_peak_status = QLabel("Peak: -- dBFS")
 
         self.status_bar.addWidget(self.lbl_device_status)
         self.status_bar.addWidget(QLabel(" | "))
@@ -875,9 +913,13 @@ class MainWindow(QMainWindow):
         self.btn_carriers.toggled.connect(
                 self._toggle_carrier_detection
             )
+        self.btn_units.toggled.connect(self._on_units_toggled)
+        self.unit_state.on_change(self._on_unit_resolution_changed)
 
         self.btn_screenshot.clicked.connect(lambda: self.recorder.take_screenshot())
-        self.btn_export_csv.clicked.connect(lambda: self.recorder.export_csv(self._last_frame))
+        self.btn_export_csv.clicked.connect(
+            lambda: self.recorder.export_csv(self._last_frame, self.unit_state.requested)
+        )
 
         # Amplitude logger actions
         self.btn_logger.clicked.connect(self._on_logger_button_clicked)
@@ -971,6 +1013,7 @@ class MainWindow(QMainWindow):
             "Shift+M":lambda: self.btn_delta_marker.click(),
             "S":      lambda: self.btn_screenshot.click(),
             "Ctrl+E": lambda: self.btn_export_csv.click(),
+            "Ctrl+U": lambda: self.btn_units.click(),
             "+":      self.spectrum_widget.zoom_in,
             "-":      self.spectrum_widget.zoom_out,
             "R":      self.spectrum_widget.reset_zoom,
@@ -1147,51 +1190,37 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, frame: SpectrumFrame):
         self._last_frame = frame
-        unit = amplitude_unit(frame)
-        self._current_unit = unit
-        self.delta_readout.set_amplitude_unit(unit)
-        self.reference_level_spin.setSuffix(f" {unit}")
+        # Re-resolve every frame: calibration validity can change with VGA gain,
+        # centre frequency, a workbook upload or a device swap. Listeners fire
+        # only on an actual change, so this stays cheap at frame rate.
+        resolution = self.unit_state.update(frame)
+        unit = resolution.unit
+
         self.spectrum_widget.update_frame(frame)
         self.waterfall_widget.update_frame(frame)
 
         if self.amplitude_logger.is_active:
             self.amplitude_logger.on_frame(frame)
 
-        peaks = getattr(frame, "peaks_dbm", None) if unit == "dBm" else None
-        if not peaks:
-            peaks = frame.peaks
+        peaks = peak_list(frame, self.unit_state)
         peak = peaks[0] if peaks else None
         if peak is not None:
             peak_frequency = peak.frequency
             peak_amplitude = peak.amplitude
         else:
-            amplitude = trace_amplitude(frame)
+            amplitude = trace_amplitude(frame, "amplitude", self.unit_state)
             index = int(np.argmax(amplitude))
             peak_frequency = frame.frequency[index]
             peak_amplitude = amplitude[index]
-        noise_floor = scalar_amplitude(frame, "noise_floor")
-        channel_power = scalar_amplitude(frame, "channel_power")
-        # Calibration state can change between frames (upload, device swap), so
-        # resolve it per frame rather than caching. The frame carries raw dBFS;
-        # the offset is applied here and, separately, inside the renderer.
-        calibrated = bool(getattr(frame, "power_calibrated", False))
-        offset = float(getattr(frame, "power_offset_db", 0.0)) if calibrated else 0.0
-        unit = "dBFS"
-        if calibrated:
-            # '*' marks a centre frequency outside the measured calibration span,
-            # where the offset is a flat extrapolation rather than interpolated.
-            unit = "dBm" if getattr(frame, "power_in_cal_range", True) else "dBm*"
+        noise_floor = scalar_amplitude(frame, "noise_floor", self.unit_state)
+        channel_power = scalar_amplitude(frame, "channel_power", self.unit_state)
 
-        if (offset, unit) != getattr(self, "_amp_cal_state", None):
-            self._amp_cal_state = (offset, unit)
-            self.spectrum_widget.set_amplitude_calibration(offset, unit)
-
-        self.lbl_peak_status.setText(f"Peak: {peak_amplitude + offset:.2f} {unit}")
+        self.lbl_peak_status.setText(f"Peak: {peak_amplitude:.2f} {unit}")
         self.lbl_meas_peak_freq.setText(f"{peak_frequency/1e6:.6f} MHz")
-        self.lbl_meas_peak_amp.setText(f"{peak_amplitude + offset:.2f} {unit}")
-        self.lbl_meas_noise.setText(f"{frame.noise_floor + offset:.2f} {unit}")
+        self.lbl_meas_peak_amp.setText(f"{peak_amplitude:.2f} {unit}")
+        self.lbl_meas_noise.setText(f"{noise_floor:.2f} {unit}")
         self.lbl_meas_obw.setText(f"{frame.bandwidth/1e3:.3f} kHz")
-        self.lbl_meas_chan_pwr.setText(f"{frame.channel_power + offset:.2f} {unit}")
+        self.lbl_meas_chan_pwr.setText(f"{channel_power:.2f} {unit}")
         self.lbl_fft_size.setText(f"FFT Size: {frame.fft_size}")
         self.lbl_rbw.setText(f"RBW: {frame.rbw/1e3:.3f} kHz")
         now = time.monotonic()
@@ -1339,8 +1368,8 @@ class MainWindow(QMainWindow):
     def _update_carrier_table(self, frame):
         table = self.table_carriers
         carriers = frame.carriers
-        calibrated = getattr(frame, "power_calibrated", False)
-        unit = getattr(frame, "amplitude_unit", "dBFS")
+        resolution = self.unit_state.resolution
+        unit = resolution.unit
 
         if unit != self._carrier_table_unit:
             self._carrier_table_unit = unit
@@ -1353,8 +1382,11 @@ class MainWindow(QMainWindow):
             if table.rowCount() != len(carriers):
                 table.setRowCount(len(carriers))
             for row, c in enumerate(carriers):
-                if calibrated and c.band_power_dbm is not None:
-                    power = c.band_power_dbm
+                band_power_dbm = getattr(c, "band_power_dbm", None)
+                if resolution.is_dbm and band_power_dbm is not None:
+                    power = band_power_dbm
+                elif resolution.is_dbm:
+                    power = resolution.apply(c.band_power_dbfs)
                 else:
                     power = c.band_power_dbfs
                 values = (
@@ -1382,6 +1414,61 @@ class MainWindow(QMainWindow):
         if self._is_running:
             self.backend.start(self._acquisition_config())
 
+
+    # -----------------------------------------------------------------------
+    # Amplitude Units
+    # -----------------------------------------------------------------------
+    def _on_units_toggled(self, checked: bool):
+        """Operator pressed the unit switch."""
+        resolution = self.unit_state.set_requested(
+            DBM if checked else DBFS, self._last_frame
+        )
+        if resolution.degraded:
+            # Honour the request in intent, refuse it in the numbers.
+            self.status_bar.showMessage(resolution.warning, 12000)
+            QMessageBox.information(self, "Not calibrated", resolution.warning)
+        elif resolution.warning:
+            self.status_bar.showMessage(resolution.warning, 8000)
+        if self._last_frame is not None:
+            self._on_frame_ready(self._last_frame)
+
+    def _on_unit_resolution_changed(self, resolution):
+        """Push the resolved unit to every widget that renders an amplitude.
+
+        Fires only when the resolution actually changes, so axis relabelling,
+        header rewrites and stylesheet repolishing stay off the frame path.
+        """
+        self._current_unit = resolution.unit
+        self.btn_units.setText(resolution.requested)
+        self.delta_readout.set_amplitude_unit(resolution.unit)
+        self.reference_level_spin.setSuffix(f" {resolution.unit}")
+        self.spectrum_widget.set_amplitude_calibration(
+            resolution.offset_db, resolution.unit
+        )
+        self.waterfall_widget.set_amplitude_unit(
+            resolution.unit, resolution.offset_db
+        )
+        self._carrier_table_unit = resolution.unit
+        self.table_carriers.setHorizontalHeaderLabels(
+            ["ID", "Centre MHz", "OBW kHz", f"Power {resolution.unit}"]
+        )
+        if self.spectrum_widget._markers:
+            self._update_marker_table(self._get_marker_state())
+
+        # Amber == "you asked for dBm and this is not dBm".
+        self.btn_units.setProperty(
+            "degraded", "true" if resolution.degraded else "false"
+        )
+        self.btn_units.style().unpolish(self.btn_units)
+        self.btn_units.style().polish(self.btn_units)
+        self.btn_units.setToolTip(
+            resolution.warning
+            or "Switch amplitude units between dBFS and dBm (Ctrl+U)"
+        )
+
+        if resolution.warning and resolution.warning != self._unit_warning_shown:
+            self.status_bar.showMessage(resolution.warning, 10000)
+        self._unit_warning_shown = resolution.warning
 
     def _reference_level_changed(self):
         self.spectrum_widget.set_reference_level(

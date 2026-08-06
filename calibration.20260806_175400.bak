@@ -122,7 +122,7 @@
           }
         ],
         "metadata": {
-          "calibrated_at": "2026-08-06T17:54:00",
+          "calibrated_at": "2026-08-06T14:53:16",
           "operator": "consolidated from prior lab sessions",
           "generator_model": "lab signal generator",
           "lna_db": 24.0,

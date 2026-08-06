@@ -251,19 +251,36 @@ The power display path is implemented as follows:
 
 1. `backend/acquisition.py` loads and merges the device/default and serial
    calibration, then resolves the live offset using frequency and gain where the
-   schema requires it. `backend/controller.py` retains the raw dBFS traces and
-   derives explicit `*_dbm` traces and measurements using
-   `dbm = dbfs + power_offset_db`.
-2. `backend/models.py` carries raw and calibrated values separately; legacy
-   amplitude fields retain their dBFS meaning.
-3. The spectrum, waterfall, reference level, peak/noise/channel-power readouts,
-   markers, delta-marker absolute levels, and status peak select the calibrated
-   dBm fields together.
-4. `frontend/recorder.py` exports separate `*_dbfs` and `*_dbm` columns so the
-   raw measurement and calibration remain auditable.
-5. Invalid or missing offsets cause a consistent, visibly labeled dBFS fallback.
-6. Automated tests cover a known offset across traces, peaks, measurements, and
-   the mocked Pluto receive path.
+   schema requires it.
+2. `backend/controller.py` keeps every trace in raw dBFS and attaches the
+   resolved conversion to the frame as `power_offset_db`, `power_calibrated`,
+   and `power_in_cal_range`. `backend/models.py` carries them alongside the raw
+   arrays so the measurement and the calibration applied to it stay separable
+   and auditable all the way out to the CSV.
+3. `frontend/units.py` resolves the **operator-selected** unit against each
+   frame's calibration state, and is the only place in the application allowed
+   to decide that a value may be labelled dBm. The rule it enforces: a value is
+   labelled `dBm` **if and only if** a valid offset was actually added to it.
+4. Every display surface - spectrum, waterfall, reference level,
+   peak/noise/channel-power readouts, markers, delta absolute levels, carrier
+   table, status peak, and the browser console - takes its unit and offset from
+   that single resolution, so they cannot disagree with one another.
+5. Selecting dBm without a valid calibration does **not** produce dBm. The
+   readouts stay in dBFS, the unit switch turns amber, and the operator is told
+   the measurements are not calibrated yet. A missing, `null`, non-numeric,
+   `NaN`, or infinite offset all take this path, as does a gain outside
+   `power_cal_vga_min_db` / `power_cal_vga_max_db`.
+6. A centre frequency outside the measured calibration span displays as `dBm*`
+   with a warning: the offset there is a clamped endpoint value, not an
+   interpolated one.
+7. `webapp/protocol.py` transmits raw dBFS with the calibration metadata in the
+   frame header; the browser applies the offset once, on receipt. Shifting
+   server-side previously produced dBm carrier values under a dBFS column
+   header.
+8. `frontend/recorder.py` exports `*_dbfs` and, when available, `*_dbm` columns
+   independently of the switch, plus a `#` provenance preamble.
+9. Automated tests (`tests/test_units.py`) cover every row of the resolution
+   table above, including each class of invalid offset.
 
 The built-in simulator has a nominal `0.0` offset so the calibrated display path
 can be tested without hardware. Its values are not physical connector power.

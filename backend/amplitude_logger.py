@@ -43,6 +43,10 @@ from pathlib import Path
 import numpy as np
 
 LOG_INTERVAL_S = 10.0
+#: The ONLY trace the logger ever reads, on desktop and in the browser alike.
+#: TraceEngine populates it on every frame regardless of whether the Average
+#: trace is switched on for display, so this needs no UI and cannot drift.
+LOG_TRACE = "average"
 DEFAULT_LOG_ROOT = Path(__file__).resolve().parents[1] / "data" / "logs"
 
 SESSION_MARKER = "#SESSION#"
@@ -130,7 +134,7 @@ class AmplitudeLogger:
         path = _day_path(self.log_root, now)
 
         session_header = [SESSION_MARKER, now.strftime("%H:%M:%S")] + [
-            f"{freq / 1e6:.6f} MHz ({unit})" for freq in frequencies_hz
+            f"{freq / 1e6:.6f} MHz {LOG_TRACE} ({unit})" for freq in frequencies_hz
         ]
         with open(path, "a", newline="") as f:
             writer = csv.writer(f)
@@ -175,7 +179,7 @@ class AmplitudeLogger:
 
         new_path = _day_path(self.log_root, now)
         session_header = [SESSION_MARKER, now.strftime("%H:%M:%S")] + [
-            f"{freq / 1e6:.6f} MHz ({self._unit})" for freq in self._frequencies
+            f"{freq / 1e6:.6f} MHz {LOG_TRACE} ({self._unit})" for freq in self._frequencies
         ]
         with open(new_path, "a", newline="") as f:
             writer = csv.writer(f)
@@ -200,9 +204,16 @@ class AmplitudeLogger:
             return False
 
         from frontend.amplitude import trace_amplitude  # local import: avoid Qt at module load
+        from frontend.units import DBFS, DBM
 
         frequency_axis = np.asarray(frame.frequency)
-        amplitude = np.asarray(trace_amplitude(frame, "average"))
+        # Log in the unit the session was opened with, resolved against THIS
+        # frame. If the session started calibrated and the calibration later
+        # stops resolving (VGA moved outside its measured range), the offset
+        # goes to zero rather than freezing at a stale value -- a silent 40 dB
+        # step inside one column would be far worse than an honest one.
+        requested = DBM if str(self._unit).startswith(DBM) else DBFS
+        amplitude = np.asarray(trace_amplitude(frame, LOG_TRACE, requested))
 
         if not self._resolved:
             self._bin_indices = [

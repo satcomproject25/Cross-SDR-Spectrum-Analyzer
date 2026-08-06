@@ -429,3 +429,36 @@ select { cursor: pointer; }
   .plot-stack { grid-template-rows: minmax(230px, 1.8fr) 23px minmax(150px, 1fr); }
   .status-metrics span:not(:first-child) { display: none; }
 }
+/* Amplitude unit switch. `active` = dBm requested and honoured; `degraded` =
+   dBm requested but no valid calibration, so dBFS values are still shown. */
+.unit-switch {
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+.unit-switch.active {
+  background: #123a4a;
+  border-color: #33d6ee;
+  color: #8deeff;
+}
+.unit-switch.degraded {
+  background: #4a3512;
+  border-color: #e0a020;
+  color: #ffd38a;
+}
+.cal-warning {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #1a1200;
+  background: #e0a020;
+  border-radius: 4px;
+}
+
+.logger-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #7c8891;
+}
+.logger-note strong { color: #a7b2ba; }
