@@ -15,7 +15,7 @@ Design notes
   changed since the currently open file was selected, transparently closes
   out the old day's file and opens (or appends to) the new day's file with
   a fresh #SESSION# marker -- without the user touching the Logger button
-  and without dropping a sample. The 10 s cadence is preserved across the
+  and without dropping a sample. The 5 s cadence is preserved across the
   rollover (see on_frame()).
 - Because different sessions on the same day may track different frequency
   sets, there is no single shared header row. Instead every session writes
@@ -42,7 +42,7 @@ from pathlib import Path
 
 import numpy as np
 
-LOG_INTERVAL_S = 10.0
+LOG_INTERVAL_S = 5.0
 DEFAULT_LOG_ROOT = Path(__file__).resolve().parents[1] / "data" / "logs"
 
 SESSION_MARKER = "#SESSION#"

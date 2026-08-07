@@ -553,7 +553,7 @@ class MainWindow(QMainWindow):
         self.btn_logger.setCheckable(True)
         self.btn_logger.setMinimumHeight(40)
         self.btn_logger.setToolTip(
-            "Log the amplitude of up to 2 carrier frequencies to CSV every 10 s"
+            "Log the amplitude of up to 2 carrier frequencies to CSV every 5 s"
         )
         self.btn_logger_plot = QPushButton("Plot Logged Data")
         lyt_logger.addWidget(self.btn_logger)
